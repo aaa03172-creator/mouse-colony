@@ -588,6 +588,97 @@ def test_litter_validation_review_is_not_double_counted_after_blocked_export(
         db.DB_PATH = old_db_path
 
 
+def test_litter_validation_review_does_not_block_mouse_csv_after_blocked_animal_export(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    old_db_path = db.DB_PATH
+    db.DB_PATH = tmp_path / "mouse_lims.sqlite"
+    monkeypatch.setattr(app_main, "ARTIFACT_ROOT", tmp_path / "mousedb_artifacts")
+    try:
+        db.init_db()
+        with db.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO source_record
+                    (source_record_id, source_type, source_uri, source_label,
+                     raw_payload, imported_at, checksum, note)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "source_csv_litter_conflict",
+                    "manual_litter_entry",
+                    "",
+                    "Manual litter csv fixture",
+                    "{}",
+                    "2026-05-19T00:00:00Z",
+                    "",
+                    "",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO mating_registry
+                    (mating_id, mating_label, strain_goal, start_date, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "mating_csv_conflict",
+                    "Mating CSV Conflict",
+                    "ApoM Tg/Tg",
+                    "2026-05-01",
+                    "active",
+                    "2026-05-19T00:00:00Z",
+                    "2026-05-19T00:00:00Z",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO litter_registry
+                    (litter_id, litter_label, mating_id, birth_date, number_born,
+                     number_alive, number_weaned, status, source_record_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "litter_csv_conflict",
+                    "F1",
+                    "mating_csv_conflict",
+                    "2026-04-13",
+                    10,
+                    10,
+                    None,
+                    "born",
+                    "source_csv_litter_conflict",
+                    "2026-05-19T00:00:01Z",
+                    "2026-05-19T00:00:01Z",
+                ),
+            )
+        client = TestClient(app_main.app)
+
+        animal_response = client.get("/api/exports/animal-sheet.xlsx")
+        csv_response = client.get("/api/exports/mice.csv?require_ready=true")
+
+        assert animal_response.status_code == 409
+        assert csv_response.status_code == 200
+        assert csv_response.text.startswith("mouse_id,display_id")
+    finally:
+        db.DB_PATH = old_db_path
+
+
+def test_static_export_buttons_use_per_export_readiness_flags() -> None:
+    html = (Path(__file__).resolve().parents[1] / "static" / "index.html").read_text(encoding="utf-8")
+
+    assert "preview.mouse_csv_ready" in html
+    assert "preview.separation_ready" in html
+    assert "preview.animal_sheet_ready" in html
+    assert "blocked_by_litter_conflict: \"Litter conflict\"" in html
+    assert "preview.separation_ready ?? preview.ready" in html
+    assert "preview.animal_sheet_ready ?? preview.ready" in html
+    assert "const allFinalReady = ready && animalSheetReady" in html
+    assert "Animal sheet review required" in html
+    assert 'button.disabled = !ready;' not in html
+
+
 def test_persist_proposed_changeset_artifact_keeps_preview_non_canonical(
     tmp_path: Path,
     monkeypatch,

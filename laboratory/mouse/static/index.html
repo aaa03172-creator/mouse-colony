@@ -4071,6 +4071,7 @@
       const rowStateLabels = {
         ready: "Ready",
         blocked_by_review: "Blocked",
+        blocked_by_litter_conflict: "Litter conflict",
         stale_after_correction: "Stale"
       };
       const rowStateLabel = rowStateLabels[rowState] || (previewReady && !hasUncertainty ? "Ready" : "Blocked");
@@ -7498,23 +7499,33 @@
 
     function setFinalExportActionState(preview) {
       const ready = Boolean(preview.ready);
+      const animalSheetReady = Boolean(preview.animal_sheet_ready ?? preview.ready);
+      const allFinalReady = ready && animalSheetReady;
+      const buttonReadiness = {
+        exportReadyMouseCsvButton: Boolean(preview.mouse_csv_ready ?? preview.ready),
+        exportSeparationXlsxButton: Boolean(preview.separation_ready ?? preview.ready),
+        exportAnimalSheetXlsxButton: animalSheetReady,
+      };
       const blockerCount = Number(preview.blocked_review_items || 0);
       const genotypeBlockerCount = Number(preview.genotype_blocker_items || 0);
+      const animalSheetValidationBlockerCount = Number(preview.animal_sheet_validation_blocker_items || 0);
       const warningCount = (preview.readiness_warnings || []).length;
       const previewRowCount = Number(preview.preview_row_count || 0);
       const hasExplicitBlockers = blockerCount || genotypeBlockerCount || warningCount;
-      const reasonText = ready
+      const reasonText = allFinalReady
         ? "Final downloads are enabled because accepted state has no blocking Focus Review items."
+        : ready && animalSheetValidationBlockerCount
+          ? `CSV and separation exports are enabled; animal sheet export is disabled until ${animalSheetValidationBlockerCount} litter/date/count validation blocker(s) are reviewed.`
         : hasExplicitBlockers
           ? `Final downloads disabled: ${blockerCount} Focus Review blocker(s), ${genotypeBlockerCount} genotype blocker(s), and ${warningCount} readiness warning(s) must be reviewed first.`
           : `Final downloads disabled: ${previewRowCount} accepted source-backed export row(s) are ready. Upload, review, and accept cage-card evidence before generating final files.`;
       const reason = document.getElementById("exportDisabledReason");
       reason.textContent = reasonText;
-      reason.classList.toggle("ready", ready);
+      reason.classList.toggle("ready", allFinalReady);
       reason.setAttribute("role", "status");
-      ["exportReadyMouseCsvButton", "exportSeparationXlsxButton", "exportAnimalSheetXlsxButton"].forEach((id) => {
+      Object.entries(buttonReadiness).forEach(([id, buttonReady]) => {
         const button = document.getElementById(id);
-        button.disabled = !ready;
+        button.disabled = !buttonReady;
         button.title = reasonText;
         button.setAttribute("aria-describedby", "exportDisabledReason");
       });
@@ -7525,17 +7536,27 @@
       const readinessWarnings = preview.readiness_warnings || [];
       const readinessItems = [...blockers, ...readinessWarnings];
       const rowCount = preview.preview_row_count || 0;
-      const statusLabel = preview.ready ? "Ready for final export" : "Blocked by review";
+      const commonReady = Boolean(preview.ready);
+      const animalSheetReady = Boolean(preview.animal_sheet_ready ?? preview.ready);
+      const allFinalReady = commonReady && animalSheetReady;
+      const animalSheetValidationBlockerCount = Number(preview.animal_sheet_validation_blocker_items || 0);
+      const statusLabel = allFinalReady
+        ? "Ready for final export"
+        : commonReady && animalSheetValidationBlockerCount
+          ? "Animal sheet review required"
+          : "Blocked by review";
       const readinessCard = document.getElementById("exportReadinessCard");
-      readinessCard.classList.toggle("ready", Boolean(preview.ready));
-      readinessCard.classList.toggle("blocked", !preview.ready);
+      readinessCard.classList.toggle("ready", allFinalReady);
+      readinessCard.classList.toggle("blocked", !allFinalReady);
       document.getElementById("exportReadinessState").textContent = statusLabel;
       const badge = document.getElementById("exportReadinessBadge");
-      badge.textContent = preview.ready ? "ready" : `${preview.blocked_review_items || 0} blocker(s)`;
-      badge.className = preview.ready ? "status" : "status warn";
+      badge.textContent = allFinalReady ? "ready" : `${preview.blocked_review_items || 0} blocker(s)`;
+      badge.className = allFinalReady ? "status" : "status warn";
       document.getElementById("exportPreview").textContent =
-        preview.ready
+        allFinalReady
           ? `Final exports can be generated from ${rowCount} source-backed mouse row(s).`
+          : commonReady && animalSheetValidationBlockerCount
+            ? `CSV and separation exports can be generated; animal sheet needs ${animalSheetValidationBlockerCount} litter/date/count validation blocker(s) reviewed first.`
           : `Resolve Focus Review blockers before final exports; quick checks and trace-only items remain visible without blocking the file.`;
       document.getElementById("exportReadinessMetrics").innerHTML = [
         ["Photos", preview.photos || 0],
@@ -7549,8 +7570,10 @@
       ].map(([label, value]) => `
         <div class="readiness-metric"><strong>${escapeHtml(value)}</strong><span>${escapeHtml(label)}</span></div>
       `).join("");
-      document.getElementById("exportActionSummary").textContent = preview.ready
+      document.getElementById("exportActionSummary").textContent = allFinalReady
         ? "Final CSV and workbook downloads are ready. Generated files will be recorded in the export log."
+        : commonReady && animalSheetValidationBlockerCount
+          ? "Final CSV and separation workbook downloads are ready; animal sheet remains blocked by litter/date/count validation."
         : `${preview.blocked_review_items || 0} Focus Review blocker(s) can still change exported values; quick checks stay reviewable without blocking export.`;
       setFinalExportActionState(preview);
       document.getElementById("exportFilenames").textContent =
@@ -7597,7 +7620,7 @@
           item.source_note_item_ids || "--",
           [item.source_photo_ids && `photo ${item.source_photo_ids}`, item.card_snapshot_ids && `snapshot ${item.card_snapshot_ids}`, item.raw_note_lines && `raw ${item.raw_note_lines}`].filter(Boolean).join(" / ") || "--",
           item.uncertainty || "--"
-        ], item, preview.ready, "separation")
+        ], item, preview.separation_ready ?? preview.ready, "separation")
       ).join("") || emptyTableRow("No separation preview rows yet", "Accepted source-backed separated cage rows will appear here before workbook export.", 12);
       document.getElementById("animalSheetRows").innerHTML = (preview.animal_sheet_rows || []).map((item) =>
         exportPreviewRow([
@@ -7613,7 +7636,7 @@
           item.source || "--",
           [item.source_photo_ids && `photo ${item.source_photo_ids}`, item.card_snapshot_ids && `snapshot ${item.card_snapshot_ids}`, item.raw_note_lines && `raw ${item.raw_note_lines}`].filter(Boolean).join(" / ") || "--",
           item.uncertainty || "--"
-        ], item, preview.ready, "animal")
+        ], item, preview.animal_sheet_ready ?? preview.ready, "animal")
       ).join("") || emptyTableRow("No animal sheet preview rows yet", "Accepted source-backed animal rows will appear here before workbook export.", 13);
       document.getElementById("exportBlockerRows").innerHTML = readinessItems.map((item) => `
         <tr>

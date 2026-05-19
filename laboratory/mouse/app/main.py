@@ -12751,8 +12751,11 @@ def open_review_blockers(
     return blockers
 
 
-def export_review_blocker_count(conn: Any) -> int:
-    return open_review_attention_counts(conn).get("must_review", 0)
+def export_review_blocker_count(conn: Any, *, exclude_animal_sheet_validation: bool = False) -> int:
+    return open_review_attention_counts(
+        conn,
+        exclude_animal_sheet_validation=exclude_animal_sheet_validation,
+    ).get("must_review", 0)
 
 
 def genotype_export_blockers(conn: Any, limit: int = 25) -> list[dict[str, Any]]:
@@ -13540,7 +13543,10 @@ def export_mice_csv(query: str = "", require_ready: bool = False) -> Response:
             payload = dict(row)
             writer.writerow({field: payload.get(field, "") for field in fieldnames})
             row_count += 1
-        blocked_review_count = export_review_blocker_count(conn)
+        blocked_review_count = export_review_blocker_count(
+            conn,
+            exclude_animal_sheet_validation=True,
+        )
         suffix = "_filtered" if query.strip() else ""
         filename = f"mouse_records{suffix}.csv"
         export_status = "blocked" if require_ready and blocked_review_count else "generated"
@@ -14359,6 +14365,8 @@ def export_preview() -> dict[str, Any]:
                 row["row_state"] = "blocked_by_litter_conflict"
                 row["row_state_reason"] = "Animal sheet litter/date/count validation blocked final export."
     total_blocked_reviews = blocked_reviews + validation_blockers
+    common_export_ready = blocked_reviews == 0 and bool(rows)
+    animal_sheet_ready = total_blocked_reviews == 0 and bool(rows)
     return {
         "source_layer": "export or view",
         "export_type": "separation_preview",
@@ -14384,7 +14392,10 @@ def export_preview() -> dict[str, Any]:
         "open_review_attention_counts": review_attention_counts,
         "genotype_blocker_items": genotype_blocker_count,
         "experiment_ready": genotype_blocker_count == 0 and bool(rows),
-        "ready": total_blocked_reviews == 0 and bool(rows),
+        "ready": common_export_ready,
+        "mouse_csv_ready": common_export_ready,
+        "separation_ready": common_export_ready,
+        "animal_sheet_ready": animal_sheet_ready,
         "preview_rows": rows,
         "separation_rows": separation_rows,
         "animal_sheet_rows": animal_rows,

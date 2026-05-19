@@ -226,7 +226,12 @@ async function main() {
   assert(
     staticHtml.includes("function setFinalExportActionState(preview)") &&
       staticHtml.includes("exportDisabledReason") &&
-      staticHtml.includes("button.disabled = !ready") &&
+      staticHtml.includes("button.disabled = !buttonReady") &&
+      staticHtml.includes("preview.mouse_csv_ready") &&
+      staticHtml.includes("preview.separation_ready") &&
+      staticHtml.includes("preview.animal_sheet_ready") &&
+      staticHtml.includes('blocked_by_litter_conflict: "Litter conflict"') &&
+      staticHtml.includes("Animal sheet review required") &&
       staticHtml.includes('button.setAttribute("aria-describedby", "exportDisabledReason")') &&
       staticHtml.includes("accepted source-backed export row(s) are ready"),
     "Export Center final actions should expose disabled reasons, accessibility links, and empty accepted-row guidance."
