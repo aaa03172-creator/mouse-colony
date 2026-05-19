@@ -111,6 +111,7 @@ These are non-canonical specs or reviews unless explicitly adopted elsewhere.
 | `docs/superpowers/specs/2026-05-09-labeling-rule-ui-design.md` | implementation planning / non-canonical project note | Labeling rule UI design. |
 | `docs/superpowers/specs/2026-05-09-low-fatigue-colony-ui-design.md` | design guidance / non-canonical product documentation | Low-fatigue UI design direction. |
 | `docs/superpowers/specs/2026-05-15-hybrid-note-line-extraction-evaluator-design.md` | parsed/intermediate workflow policy design | Hybrid local OCR, AI draft, ROI, and rule-context evaluator design for mouse ID and note-line extraction accuracy. |
+| `docs/superpowers/specs/2026-05-19-animal-sheet-litter-date-count-validation-review_ko.md` | review item / non-canonical implementation design | Animal sheet pup count, separation count, and litter/date validation review; recommends blocked export/review routing instead of silent overwrite. |
 
 ## Superpowers Plans
 
