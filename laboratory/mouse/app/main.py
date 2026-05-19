@@ -5319,6 +5319,7 @@ def create_export_provenance_artifacts(
         "manifest": manifest,
         "manifest_artifact_path": manifest["artifact_path"],
         "validation_report_id": validation_report["report_id"],
+        "validation_report_path": validation_report["artifact_path"],
         "state_watermark": manifest["artifact"].get("state_watermark", ""),
     }
 
@@ -14011,6 +14012,7 @@ def export_animal_sheet_xlsx(query: str = "", require_ready: bool = True) -> Res
                 "animal_sheet_validation_review_items": validation_reviews,
                 "export_manifest_path": provenance["manifest_artifact_path"],
                 "validation_report_id": provenance["validation_report_id"],
+                "validation_report_path": provenance["validation_report_path"],
             },
         )
     payload = build_xlsx(

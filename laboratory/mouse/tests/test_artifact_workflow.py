@@ -401,6 +401,20 @@ def test_animal_sheet_export_blocks_litter_date_conflict_and_logs_review(
         detail = response.json()["detail"]
         assert detail["source_layer"] == "export or view"
         assert detail["animal_sheet_litter_validation"]["blocked_count"] == 1
+        assert response.headers["content-type"].startswith("application/json")
+        manifest_path = Path(detail["export_manifest_path"])
+        report_path = Path(detail["validation_report_path"])
+        assert manifest_path.exists()
+        assert report_path.exists()
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        assert manifest["artifact_type"] == "export_manifest"
+        assert manifest["status"] == "blocked"
+        assert manifest["validation_report_id"] == detail["validation_report_id"]
+        assert manifest["validation_report_path"] == str(report_path)
+        assert report["artifact_type"] == "validation_report"
+        assert report["status"] == "blocked"
+        assert manifest["source_refs"]["source_record_ids"] == ["source_litter_conflict"]
         with db.connection() as conn:
             review_count = conn.execute(
                 "SELECT COUNT(*) AS count FROM review_queue WHERE issue = ?",
@@ -408,9 +422,12 @@ def test_animal_sheet_export_blocks_litter_date_conflict_and_logs_review(
             ).fetchone()["count"]
             assert review_count == 1
             export_log = conn.execute(
-                "SELECT status, export_type FROM export_log ORDER BY exported_at DESC LIMIT 1"
+                "SELECT status, export_type, note FROM export_log ORDER BY exported_at DESC LIMIT 1"
             ).fetchone()
-            assert dict(export_log) == {"status": "blocked", "export_type": "animal_sheet_xlsx"}
+            assert export_log["status"] == "blocked"
+            assert export_log["export_type"] == "animal_sheet_xlsx"
+            assert f"manifest={manifest_path}" in export_log["note"]
+            assert f"validation_report={detail['validation_report_id']}" in export_log["note"]
     finally:
         db.DB_PATH = old_db_path
 
