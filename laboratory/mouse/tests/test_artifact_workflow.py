@@ -13,6 +13,286 @@ from app import db
 from app import main as app_main
 
 
+def test_animal_sheet_litter_validator_blocks_birth_before_mating() -> None:
+    rows = [
+        {
+            "sex": "F1",
+            "mouse_id": "10p",
+            "litter_id": "litter_bad_date",
+            "mating_id": "mating_bad_date",
+            "mating_start_date": "2026-05-01",
+            "litter_birth_date": "2026-04-13",
+            "source_record_id": "source_litter_bad_date",
+            "row_state": "ready",
+        }
+    ]
+
+    result = app_main.validate_animal_sheet_litter_date_counts(rows)
+
+    assert result["status"] == "blocked"
+    assert result["blocked_count"] == 1
+    check = result["checks"][0]
+    assert check["validator_check_key"] == "litter_date_before_mating"
+    assert check["validation_report_check_key"] == "impossible_date"
+    assert check["status"] == "blocked"
+    assert check["severity"] == "high"
+    assert check["target_refs"] == ["litter_bad_date", "mating_bad_date"]
+
+
+def test_animal_sheet_litter_validator_blocks_weaned_count_above_born() -> None:
+    rows = [
+        {
+            "sex": "F1",
+            "mouse_id": "12p",
+            "litter_id": "litter_bad_count",
+            "mating_id": "mating_bad_count",
+            "mating_start_date": "2026-04-01",
+            "litter_birth_date": "2026-04-22",
+            "number_born": 10,
+            "number_weaned": 12,
+            "weaning_date": "2026-05-15",
+            "source_record_id": "source_litter_bad_count",
+            "row_state": "ready",
+        }
+    ]
+
+    result = app_main.validate_animal_sheet_litter_date_counts(rows)
+
+    assert result["status"] == "blocked"
+    assert result["blocked_count"] == 1
+    check = result["checks"][0]
+    assert check["validator_check_key"] == "weaned_count_exceeds_born"
+    assert check["validation_report_check_key"] == "count_mismatch"
+    assert check["status"] == "blocked"
+    assert check["target_refs"] == ["litter_bad_count", "mating_bad_count"]
+
+
+def test_export_validation_report_maps_litter_checks_to_schema_keys() -> None:
+    preview = {
+        "blocked_review_items": 1,
+        "focus_review_blocker_items": 0,
+        "latest_data_change_at": "2026-05-19T00:00:00Z",
+        "review_blockers": [],
+        "animal_sheet_rows": [
+            {
+                "mouse_id": "10p",
+                "litter_id": "litter_bad_date",
+                "source_record_id": "source_litter_bad_date",
+            }
+        ],
+        "animal_sheet_litter_validation": {
+            "source_layer": "export or view",
+            "status": "blocked",
+            "blocked_count": 1,
+            "warning_count": 0,
+            "checks": [
+                {
+                    "validator_check_key": "litter_date_before_mating",
+                    "validation_report_check_key": "impossible_date",
+                    "status": "blocked",
+                    "severity": "high",
+                    "message": "Animal sheet litter birth date is earlier than the mating start date.",
+                    "target_refs": ["litter_bad_date"],
+                    "evidence_refs": ["source_litter_bad_date"],
+                    "recommended_action": "Confirm the litter date before export.",
+                }
+            ],
+        },
+        "preview_rows": [],
+        "separation_rows": [],
+    }
+
+    report = app_main.build_export_validation_report(
+        preview,
+        export_type="animal_sheet_xlsx",
+        filename="animal.xlsx",
+    )
+
+    check = next(item for item in report["checks"] if item["check_key"] == "impossible_date")
+    assert check["status"] == "blocked"
+    assert check["target_refs"] == ["litter_bad_date"]
+    assert "litter_date_before_mating" in check["message"]
+    focus_check = next(item for item in report["checks"] if item["check_key"] == "open_focus_review_blocker")
+    assert focus_check["status"] == "pass"
+    assert report["status"] == "blocked"
+
+
+def test_animal_sheet_export_blocks_litter_date_conflict_and_logs_review(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    old_db_path = db.DB_PATH
+    db.DB_PATH = tmp_path / "mouse_lims.sqlite"
+    monkeypatch.setattr(app_main, "ARTIFACT_ROOT", tmp_path / "mousedb_artifacts")
+    try:
+        db.init_db()
+        with db.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO source_record
+                    (source_record_id, source_type, source_uri, source_label,
+                     raw_payload, imported_at, checksum, note)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "source_litter_conflict",
+                    "manual_litter_entry",
+                    "",
+                    "Manual litter conflict fixture",
+                    "{}",
+                    "2026-05-19T00:00:00Z",
+                    "",
+                    "",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO mating_registry
+                    (mating_id, mating_label, strain_goal, start_date, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "mating_conflict",
+                    "Mating Conflict",
+                    "ApoM Tg/Tg",
+                    "2026-05-01",
+                    "active",
+                    "2026-05-19T00:00:00Z",
+                    "2026-05-19T00:00:00Z",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO litter_registry
+                    (litter_id, litter_label, mating_id, birth_date, number_born,
+                     number_alive, number_weaned, status, source_record_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "litter_conflict",
+                    "F1",
+                    "mating_conflict",
+                    "2026-04-13",
+                    10,
+                    10,
+                    None,
+                    "born",
+                    "source_litter_conflict",
+                    "2026-05-19T00:00:01Z",
+                    "2026-05-19T00:00:01Z",
+                ),
+            )
+
+        response = TestClient(app_main.app).get("/api/exports/animal-sheet.xlsx")
+
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert detail["source_layer"] == "export or view"
+        assert detail["animal_sheet_litter_validation"]["blocked_count"] == 1
+        with db.connection() as conn:
+            review_count = conn.execute(
+                "SELECT COUNT(*) AS count FROM review_queue WHERE issue = ?",
+                ("Animal sheet litter/date conflict",),
+            ).fetchone()["count"]
+            assert review_count == 1
+            export_log = conn.execute(
+                "SELECT status, export_type FROM export_log ORDER BY exported_at DESC LIMIT 1"
+            ).fetchone()
+            assert dict(export_log) == {"status": "blocked", "export_type": "animal_sheet_xlsx"}
+    finally:
+        db.DB_PATH = old_db_path
+
+
+def test_animal_sheet_export_dedupes_litter_validation_review_items(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    old_db_path = db.DB_PATH
+    db.DB_PATH = tmp_path / "mouse_lims.sqlite"
+    monkeypatch.setattr(app_main, "ARTIFACT_ROOT", tmp_path / "mousedb_artifacts")
+    try:
+        db.init_db()
+        with db.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO source_record
+                    (source_record_id, source_type, source_uri, source_label,
+                     raw_payload, imported_at, checksum, note)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "source_litter_dedupe",
+                    "manual_litter_entry",
+                    "",
+                    "Manual litter dedupe fixture",
+                    "{}",
+                    "2026-05-19T00:00:00Z",
+                    "",
+                    "",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO mating_registry
+                    (mating_id, mating_label, strain_goal, start_date, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "mating_dedupe",
+                    "Mating Dedupe",
+                    "ApoM Tg/Tg",
+                    "2026-05-01",
+                    "active",
+                    "2026-05-19T00:00:00Z",
+                    "2026-05-19T00:00:00Z",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO litter_registry
+                    (litter_id, litter_label, mating_id, birth_date, number_born,
+                     number_alive, number_weaned, status, source_record_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "litter_dedupe",
+                    "F1",
+                    "mating_dedupe",
+                    "2026-04-13",
+                    10,
+                    10,
+                    None,
+                    "born",
+                    "source_litter_dedupe",
+                    "2026-05-19T00:00:01Z",
+                    "2026-05-19T00:00:01Z",
+                ),
+            )
+
+        client = TestClient(app_main.app)
+        first = client.get("/api/exports/animal-sheet.xlsx")
+        second = client.get("/api/exports/animal-sheet.xlsx")
+
+        assert first.status_code == 409
+        assert second.status_code == 409
+        with db.connection() as conn:
+            review_count = conn.execute(
+                "SELECT COUNT(*) AS count FROM review_queue WHERE issue = ?",
+                ("Animal sheet litter/date conflict",),
+            ).fetchone()["count"]
+            assert review_count == 1
+            blocked_logs = conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM export_log
+                WHERE export_type = 'animal_sheet_xlsx' AND status = 'blocked'
+                """
+            ).fetchone()["count"]
+            assert blocked_logs == 2
+    finally:
+        db.DB_PATH = old_db_path
+
+
 def test_persist_proposed_changeset_artifact_keeps_preview_non_canonical(
     tmp_path: Path,
     monkeypatch,

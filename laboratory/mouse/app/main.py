@@ -4903,6 +4903,105 @@ def export_row_trace_refs(row: dict[str, Any]) -> dict[str, list[str]]:
     }
 
 
+def _export_iso_date(value: Any) -> date | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _export_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _animal_sheet_check_refs(row: dict[str, Any]) -> dict[str, list[str]]:
+    refs = export_row_trace_refs(row)
+    return {
+        "photo_ids": refs["photo_ids"],
+        "note_item_ids": refs["note_item_ids"],
+        "source_record_ids": refs["source_record_ids"],
+        "mating_ids": split_export_ref_values(row.get("mating_id")),
+        "litter_ids": split_export_ref_values(row.get("litter_id")),
+    }
+
+
+def validate_animal_sheet_litter_date_counts(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    checks: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict) or not str(row.get("litter_id") or "").strip():
+            continue
+        refs = _animal_sheet_check_refs(row)
+        target_refs = unique_nonempty(refs["litter_ids"] + refs["mating_ids"])
+        evidence_refs = unique_nonempty(
+            refs["photo_ids"] + refs["note_item_ids"] + refs["source_record_ids"]
+        )
+        mating_date = _export_iso_date(row.get("mating_start_date"))
+        birth_date = _export_iso_date(row.get("litter_birth_date") or row.get("dob"))
+        if mating_date and birth_date and birth_date < mating_date:
+            checks.append(
+                {
+                    "validator_check_key": "litter_date_before_mating",
+                    "validation_report_check_key": "impossible_date",
+                    "status": "blocked",
+                    "severity": "high",
+                    "message": "Animal sheet litter birth date is earlier than the mating start date.",
+                    "target_refs": target_refs,
+                    "evidence_refs": evidence_refs,
+                    "recommended_action": "Confirm the litter date from source photo, note line, or imported row before final animal sheet export.",
+                    "source_refs": refs,
+                }
+            )
+        weaning_date = _export_iso_date(row.get("weaning_date"))
+        if birth_date and weaning_date and weaning_date < birth_date:
+            checks.append(
+                {
+                    "validator_check_key": "weaning_date_before_birth",
+                    "validation_report_check_key": "impossible_date",
+                    "status": "blocked",
+                    "severity": "high",
+                    "message": "Animal sheet weaning/separation date is earlier than the litter birth date.",
+                    "target_refs": target_refs,
+                    "evidence_refs": evidence_refs,
+                    "recommended_action": "Confirm separation or weaning date before final animal sheet export.",
+                    "source_refs": refs,
+                }
+            )
+        born = _export_int(row.get("number_born"))
+        weaned = _export_int(row.get("number_weaned"))
+        if born is not None and weaned is not None and weaned > born:
+            checks.append(
+                {
+                    "validator_check_key": "weaned_count_exceeds_born",
+                    "validation_report_check_key": "count_mismatch",
+                    "status": "blocked",
+                    "severity": "high",
+                    "message": "Animal sheet weaned/separated count is greater than the recorded pup count.",
+                    "target_refs": target_refs,
+                    "evidence_refs": evidence_refs,
+                    "recommended_action": "Review pup count and separation count before final animal sheet export.",
+                    "source_refs": refs,
+                }
+            )
+    blocked_count = sum(1 for check in checks if check["status"] == "blocked")
+    warning_count = sum(1 for check in checks if check["status"] == "warning")
+    return {
+        "source_layer": "export or view",
+        "status": "blocked" if blocked_count else ("warning" if warning_count else "pass"),
+        "blocked_count": blocked_count,
+        "warning_count": warning_count,
+        "checks": checks,
+        "review_item_candidates": [],
+    }
+
+
 def build_export_validation_report(
     preview: dict[str, Any],
     *,
@@ -4913,7 +5012,10 @@ def build_export_validation_report(
 ) -> dict[str, Any]:
     created_at = created_at or utc_now()
     review_blockers = preview.get("review_blockers") if isinstance(preview.get("review_blockers"), list) else []
-    blocked_review_count = int(preview.get("blocked_review_items") or len(review_blockers) or 0)
+    focus_review_count = int(
+        preview.get("focus_review_blocker_items", preview.get("blocked_review_items") or len(review_blockers) or 0)
+        or 0
+    )
     export_rows = []
     trace_rows = []
     if export_type == "animal_sheet_xlsx":
@@ -4949,11 +5051,11 @@ def build_export_validation_report(
     checks = [
         {
             "check_key": "open_focus_review_blocker",
-            "status": "blocked" if blocked_review_count else "pass",
-            "severity": "high" if blocked_review_count else "low",
+            "status": "blocked" if focus_review_count else "pass",
+            "severity": "high" if focus_review_count else "low",
             "message": (
-                f"{blocked_review_count} Focus Review blocker(s) remain open before final export."
-                if blocked_review_count
+                f"{focus_review_count} Focus Review blocker(s) remain open before final export."
+                if focus_review_count
                 else "No Focus Review blockers remain for final export."
             ),
             "target_refs": review_ids,
@@ -4974,6 +5076,34 @@ def build_export_validation_report(
             "recommended_action": "Review export trace sheet before handoff.",
         },
     ]
+    if export_type == "animal_sheet_xlsx":
+        litter_validation = preview.get("animal_sheet_litter_validation")
+        if isinstance(litter_validation, dict):
+            for check in litter_validation.get("checks", []):
+                if not isinstance(check, dict):
+                    continue
+                report_key = str(check.get("validation_report_check_key") or "")
+                if report_key not in {
+                    "impossible_date",
+                    "count_mismatch",
+                    "missing_source_trace",
+                    "open_focus_review_blocker",
+                }:
+                    report_key = "open_focus_review_blocker"
+                checks.append(
+                    {
+                        "check_key": report_key,
+                        "status": str(check.get("status") or "warning"),
+                        "severity": str(check.get("severity") or "medium"),
+                        "message": f"{check.get('validator_check_key')}: {check.get('message')}",
+                        "target_refs": unique_nonempty(check.get("target_refs", [])),
+                        "evidence_refs": unique_nonempty(check.get("evidence_refs", [])),
+                        "recommended_action": str(
+                            check.get("recommended_action")
+                            or "Review animal sheet litter/date/count conflict before export."
+                        ),
+                    }
+                )
     report_id = f"validation_report_export_{safe_artifact_slug(export_type)}_{safe_artifact_slug(query or filename or 'all')}"
     return {
         "report_id": report_id,
@@ -5112,6 +5242,85 @@ def create_export_provenance_artifacts(
         "validation_report_id": validation_report["report_id"],
         "state_watermark": manifest["artifact"].get("state_watermark", ""),
     }
+
+
+def ensure_export_validation_parse(conn: Any) -> str:
+    parse_id = "parse_export_validation"
+    existing = conn.execute("SELECT parse_id FROM parse_result WHERE parse_id = ?", (parse_id,)).fetchone()
+    if existing:
+        return parse_id
+    now = utc_now()
+    conn.execute(
+        """
+        INSERT INTO parse_result
+            (parse_id, photo_id, source_name, raw_payload, parsed_at, status, confidence, needs_review)
+        VALUES (?, NULL, ?, ?, ?, ?, ?, ?)
+        """,
+        (parse_id, "animal_sheet_export_validation", "{}", now, "review", 0, 1),
+    )
+    return parse_id
+
+
+def persist_animal_sheet_litter_review_items(
+    conn: Any,
+    validation: dict[str, Any],
+    parse_id: str = "parse_export_validation",
+) -> list[dict[str, Any]]:
+    created: list[dict[str, Any]] = []
+    for check in validation.get("checks", []):
+        if not isinstance(check, dict) or check.get("status") != "blocked":
+            continue
+        issue = (
+            "Animal sheet count conflict"
+            if check.get("validation_report_check_key") == "count_mismatch"
+            else "Animal sheet litter/date conflict"
+        )
+        trigger = {
+            "validator_check_key": check.get("validator_check_key", ""),
+            "validation_report_check_key": check.get("validation_report_check_key", ""),
+            "target_refs": check.get("target_refs", []),
+        }
+        trigger_json = json.dumps(trigger, sort_keys=True, ensure_ascii=False)
+        existing = conn.execute(
+            """
+            SELECT review_id
+            FROM review_queue
+            WHERE status = 'open'
+              AND issue = ?
+              AND review_trigger_json = ?
+            """,
+            (issue, trigger_json),
+        ).fetchone()
+        if existing:
+            created.append({"review_id": existing["review_id"], "created": False})
+            continue
+        review_id = new_id("review")
+        now = utc_now()
+        conn.execute(
+            """
+            INSERT INTO review_queue
+                (review_id, parse_id, severity, issue, current_value, suggested_value,
+                 review_reason, priority, evidence_reference_json, review_trigger_json,
+                 status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                review_id,
+                parse_id,
+                str(check.get("severity") or "high"),
+                issue,
+                json.dumps(check.get("target_refs", []), ensure_ascii=False),
+                json.dumps(check.get("evidence_refs", []), ensure_ascii=False),
+                str(check.get("message") or "Review animal sheet litter/date/count conflict before export."),
+                "high",
+                json.dumps(check.get("source_refs", {}), ensure_ascii=False),
+                trigger_json,
+                "open",
+                now,
+            ),
+        )
+        created.append({"review_id": review_id, "created": True})
+    return created
 
 
 def canonical_candidate_apply_preview(conn: Any, candidate_id: str) -> dict[str, Any]:
@@ -13637,6 +13846,16 @@ def export_animal_sheet_xlsx(query: str = "", require_ready: bool = True) -> Res
     filename = export_filename("animal", preview, query)
     blocked_count = preview["blocked_review_items"]
     if require_ready and blocked_count:
+        validation_reviews: list[dict[str, Any]] = []
+        animal_sheet_validation = preview.get("animal_sheet_litter_validation", {})
+        if isinstance(animal_sheet_validation, dict) and int(animal_sheet_validation.get("blocked_count") or 0):
+            with connection() as conn:
+                parse_id = ensure_export_validation_parse(conn)
+                validation_reviews = persist_animal_sheet_litter_review_items(
+                    conn,
+                    animal_sheet_validation,
+                    parse_id=parse_id,
+                )
         provenance = create_export_provenance_artifacts(
             preview,
             export_type="animal_sheet_xlsx",
@@ -13665,6 +13884,8 @@ def export_animal_sheet_xlsx(query: str = "", require_ready: bool = True) -> Res
                 "review_blockers": preview["review_blockers"],
                 "filename": filename,
                 "source_layer": "export or view",
+                "animal_sheet_litter_validation": preview.get("animal_sheet_litter_validation", {}),
+                "animal_sheet_validation_review_items": validation_reviews,
                 "export_manifest_path": provenance["manifest_artifact_path"],
                 "validation_report_id": provenance["validation_report_id"],
             },
@@ -14041,10 +14262,32 @@ def export_preview() -> dict[str, Any]:
                     "card_snapshot_ids": "",
                     "raw_note_lines": "",
                     "uncertainty": "",
+                    "mating_id": litter["mating_id"] or "",
+                    "litter_id": litter["litter_id"] or "",
+                    "mating_start_date": mating["start_date"] or "",
+                    "litter_birth_date": litter["birth_date"] or "",
+                    "number_born": litter["number_born"],
+                    "number_alive": litter["number_alive"],
+                    "number_weaned": litter["number_weaned"],
+                    "weaning_date": litter["weaning_date"] or "",
                     **row_state,
                     "export_note": "Litter row generated from accepted litter state.",
                 }
             )
+    animal_sheet_litter_validation = validate_animal_sheet_litter_date_counts(animal_rows)
+    validation_blockers = int(animal_sheet_litter_validation["blocked_count"])
+    if validation_blockers:
+        blocked_litter_ids = {
+            target_ref
+            for check in animal_sheet_litter_validation["checks"]
+            if check.get("status") == "blocked"
+            for target_ref in check.get("target_refs", [])
+        }
+        for row in animal_rows:
+            if row.get("litter_id") in blocked_litter_ids:
+                row["row_state"] = "blocked_by_litter_conflict"
+                row["row_state_reason"] = "Animal sheet litter/date/count validation blocked final export."
+    total_blocked_reviews = blocked_reviews + validation_blockers
     return {
         "source_layer": "export or view",
         "export_type": "separation_preview",
@@ -14063,15 +14306,18 @@ def export_preview() -> dict[str, Any]:
         "animal_sheet_columns": ["Cage No.", "Strain", "Sex", "I.D", "genotype", "DOB", "Mating date", "Pubs", "Status", "Source"],
         "photos": photos,
         "parsed_results": parsed,
-        "blocked_review_items": blocked_reviews,
+        "blocked_review_items": total_blocked_reviews,
+        "focus_review_blocker_items": blocked_reviews,
+        "animal_sheet_validation_blocker_items": validation_blockers,
         "open_review_items": open_reviews,
         "open_review_attention_counts": review_attention_counts,
         "genotype_blocker_items": genotype_blocker_count,
         "experiment_ready": genotype_blocker_count == 0 and bool(rows),
-        "ready": blocked_reviews == 0 and bool(rows),
+        "ready": total_blocked_reviews == 0 and bool(rows),
         "preview_rows": rows,
         "separation_rows": separation_rows,
         "animal_sheet_rows": animal_rows,
+        "animal_sheet_litter_validation": animal_sheet_litter_validation,
         "preview_row_count": len(rows),
         "separation_row_count": len(separation_rows),
         "animal_sheet_row_count": len(animal_rows),
