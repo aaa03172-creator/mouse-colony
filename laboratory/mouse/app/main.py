@@ -4944,6 +4944,30 @@ def _animal_sheet_check_refs(row: dict[str, Any]) -> dict[str, list[str]]:
     }
 
 
+def litter_birth_date_review_status_from_source_payload(raw_payload: Any) -> str:
+    payload = json_object(str(raw_payload or ""))
+    status_keys = {
+        "litter_birth_date_review_status",
+        "litterBirthDateReviewStatus",
+        "birth_date_review_status",
+        "birthDateReviewStatus",
+    }
+    stack: list[Any] = [payload]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            for key, value in current.items():
+                if key in status_keys:
+                    status = str(value or "").strip()
+                    if status:
+                        return status
+                elif isinstance(value, (dict, list)):
+                    stack.append(value)
+        elif isinstance(current, list):
+            stack.extend(current)
+    return ""
+
+
 def validate_animal_sheet_litter_date_counts(rows: list[dict[str, Any]]) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
     for row in rows:
@@ -5336,6 +5360,10 @@ def persist_animal_sheet_litter_review_items(
             "target_refs": check.get("target_refs", []),
         }
         trigger_json = json.dumps(trigger, sort_keys=True, ensure_ascii=False)
+        current_value = json.dumps(check.get("target_refs", []), ensure_ascii=False)
+        suggested_value = json.dumps(check.get("evidence_refs", []), ensure_ascii=False)
+        review_reason = str(check.get("message") or "Review animal sheet litter/date/count conflict before export.")
+        evidence_reference_json = json.dumps(check.get("source_refs", {}), ensure_ascii=False)
         existing = conn.execute(
             """
             SELECT review_id
@@ -5347,7 +5375,28 @@ def persist_animal_sheet_litter_review_items(
             (issue, trigger_json),
         ).fetchone()
         if existing:
-            created.append({"review_id": existing["review_id"], "created": False})
+            conn.execute(
+                """
+                UPDATE review_queue
+                SET severity = ?,
+                    current_value = ?,
+                    suggested_value = ?,
+                    review_reason = ?,
+                    priority = ?,
+                    evidence_reference_json = ?
+                WHERE review_id = ?
+                """,
+                (
+                    str(check.get("severity") or "high"),
+                    current_value,
+                    suggested_value,
+                    review_reason,
+                    "high",
+                    evidence_reference_json,
+                    existing["review_id"],
+                ),
+            )
+            created.append({"review_id": existing["review_id"], "created": False, "refreshed": True})
             continue
         review_id = new_id("review")
         now = utc_now()
@@ -5364,11 +5413,11 @@ def persist_animal_sheet_litter_review_items(
                 parse_id,
                 str(check.get("severity") or "high"),
                 issue,
-                json.dumps(check.get("target_refs", []), ensure_ascii=False),
-                json.dumps(check.get("evidence_refs", []), ensure_ascii=False),
-                str(check.get("message") or "Review animal sheet litter/date/count conflict before export."),
+                current_value,
+                suggested_value,
+                review_reason,
                 "high",
-                json.dumps(check.get("source_refs", {}), ensure_ascii=False),
+                evidence_reference_json,
                 trigger_json,
                 "open",
                 now,
@@ -14158,8 +14207,10 @@ def export_preview() -> dict[str, Any]:
             """
             SELECT l.litter_id, l.litter_label, l.mating_id, l.birth_date,
                    l.number_born, l.number_alive, l.number_weaned, l.weaning_date,
-                   l.status, l.source_record_id
+                   l.status, l.source_record_id,
+                   source.raw_payload AS source_raw_payload
             FROM litter_registry l
+            LEFT JOIN source_record source ON source.source_record_id = l.source_record_id
             ORDER BY l.birth_date, l.created_at
             LIMIT 120
             """
@@ -14343,6 +14394,9 @@ def export_preview() -> dict[str, Any]:
                     "litter_id": litter["litter_id"] or "",
                     "mating_start_date": mating["start_date"] or "",
                     "litter_birth_date": litter["birth_date"] or "",
+                    "litter_birth_date_review_status": litter_birth_date_review_status_from_source_payload(
+                        litter["source_raw_payload"]
+                    ),
                     "number_born": litter["number_born"],
                     "number_alive": litter["number_alive"],
                     "number_weaned": litter["number_weaned"],

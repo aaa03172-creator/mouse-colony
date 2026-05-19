@@ -232,6 +232,8 @@ async function main() {
       staticHtml.includes("preview.animal_sheet_ready") &&
       staticHtml.includes('blocked_by_litter_conflict: "Litter conflict"') &&
       staticHtml.includes("Animal sheet review required") &&
+      staticHtml.includes("Animal sheet review") &&
+      staticHtml.includes("CSV and separation ready; animal sheet needs litter review.") &&
       staticHtml.includes('button.setAttribute("aria-describedby", "exportDisabledReason")') &&
       staticHtml.includes("accepted source-backed export row(s) are ready"),
     "Export Center final actions should expose disabled reasons, accessibility links, and empty accepted-row guidance."

@@ -6501,18 +6501,27 @@
       const pendingPhotoCount = photoWorkbench.pending_transcription_count || 0;
       const comparisons = evidenceComparison.comparisons || [];
       const comparisonReviewCount = comparisons.filter((item) => item.review_required || item.review_status === "open").length;
+      const commonExportReady = Boolean(preview.ready);
+      const animalSheetReady = Boolean(preview.animal_sheet_ready ?? preview.ready);
+      const allFinalExportsReady = commonExportReady && animalSheetReady;
+      const animalSheetValidationBlockerCount = Number(preview.animal_sheet_validation_blocker_items || 0);
+      const topExportLabel = allFinalExportsReady
+        ? "Export ready"
+        : commonExportReady && animalSheetValidationBlockerCount
+          ? "Animal sheet review"
+          : `${preview.blocked_review_items || 0} export blockers`;
       document.getElementById("navPhotoCount").textContent = String(pendingPhotoCount || photos.length);
       document.getElementById("navReviewCount").textContent = String(openReviewCount);
       document.getElementById("navComparisonCount").textContent = String(comparisonReviewCount);
-      document.getElementById("navExportCount").textContent = preview.ready ? "ready" : String(preview.blocked_review_items || 0);
+      document.getElementById("navExportCount").textContent = allFinalExportsReady ? "ready" : String(preview.blocked_review_items || 0);
       document.getElementById("navMouseCount").textContent = String(mice.length);
       document.getElementById("navDashboardCount").textContent = String(openReviewCount);
       document.getElementById("heroPhotoCount").textContent = String(photos.length);
       document.getElementById("heroPendingPhotos").textContent = String(pendingPhotoCount);
       document.getElementById("heroOpenReviews").textContent = String(openReviewCount);
       document.getElementById("topOpenReviews").textContent = `${openReviewCount} open reviews`;
-      document.getElementById("topExportStatus").textContent = preview.ready ? "Export ready" : `${preview.blocked_review_items || 0} export blockers`;
-      document.getElementById("topExportStatus").classList.toggle("warn", !preview.ready);
+      document.getElementById("topExportStatus").textContent = topExportLabel;
+      document.getElementById("topExportStatus").classList.toggle("warn", !allFinalExportsReady);
       const aiStatus = health.ai_draft || {};
       document.getElementById("health").textContent = aiStatus.available ? "local + AI draft ready" : "local-only";
     }
@@ -7376,7 +7385,11 @@
           "Export preview rows",
           preview.preview_row_count || 0,
           "export or view",
-          preview.ready ? "Ready for final export." : "Use as preview only until blockers are cleared."
+          preview.ready && (preview.animal_sheet_ready ?? preview.ready)
+            ? "Ready for final export."
+            : preview.ready && Number(preview.animal_sheet_validation_blocker_items || 0)
+              ? "CSV and separation ready; animal sheet needs litter review."
+              : "Use as preview only until blockers are cleared."
         ],
         [
           "Stored source photos",
