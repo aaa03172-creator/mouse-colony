@@ -93,11 +93,12 @@ Return shape:
 
 ```json
 {
-  "source_layer": "review item / export or view",
+  "source_layer": "export or view",
   "status": "pass | warning | blocked",
   "checks": [
     {
-      "check_key": "litter_date_before_mating",
+      "validator_check_key": "litter_date_before_mating",
+      "validation_report_check_key": "impossible_date",
       "status": "blocked",
       "severity": "high",
       "animal_sheet_row_key": "mating_animal_render:F1",
@@ -114,11 +115,17 @@ Return shape:
       "recommended_action": "Open source photo or source row and confirm litter date before export."
     }
   ],
-  "review_items": []
+  "review_item_candidates": [
+    {
+      "source_layer": "review item",
+      "issue": "Animal sheet litter/date conflict",
+      "severity": "high"
+    }
+  ]
 }
 ```
 
-The validator should not write canonical state. It may either return proposed review items to the caller or insert review items in the same transaction that logs a blocked export. The safer first implementation is to return proposed review items and let the export/apply path own persistence.
+The validator result is an export/view artifact because it evaluates export readiness. Review items are nested candidates with their own `source_layer = review item`. The validator should not write canonical state. It may either return proposed review items to the caller or insert review items in the same transaction that logs a blocked export. The safer first implementation is to return proposed review items and let the export/apply path own persistence.
 
 ## Validation Rules
 
@@ -183,7 +190,7 @@ Review items created by this validator should use the existing `review_queue` pa
 | `suggested_value` | compact JSON containing canonical/source-backed candidate values |
 | `review_reason` | user-facing reason in lab language |
 | `evidence_reference_json` | photo IDs, note item IDs, source record IDs, mating IDs, litter IDs |
-| `review_trigger_json` | check key, rule set ID, threshold snapshot, export filename/query |
+| `review_trigger_json` | validator-specific check key, schema-compatible validation report check key, rule set ID, threshold snapshot, export filename/query |
 
 Example user-facing reason:
 
@@ -199,13 +206,21 @@ The export preview should expose row-level validation:
 - `row_validation_reason`: short human-readable reason
 - `row_validation_refs`: photo/note/source/mating/litter IDs
 
-The validation report should add check keys beyond the current `open_focus_review_blocker` and `missing_source_trace`:
+### Validation Report Schema Compatibility
 
-- `impossible_date`
-- `count_mismatch`
-- `litter_state_conflict`
-- `ambiguous_date_normalization`
-- `stale_source_priority_conflict`
+The current `docs/artifact_contracts/validation_report.schema.json` constrains `checks[].check_key` to an enum. Initial implementation should stay schema-compatible by mapping validator-specific checks into existing report keys:
+
+| Validator-specific condition | `validation_report.check_key` | Where to keep detail |
+| --- | --- | --- |
+| `litter_date_before_mating` | `impossible_date` | `message`, `target_refs`, `evidence_refs`, `recommended_action`, and review metadata |
+| `weaning_date_before_birth` | `impossible_date` | `message`, `target_refs`, `evidence_refs`, `recommended_action`, and review metadata |
+| `ambiguous_date_normalization` | `impossible_date` | `message` and review metadata; do not emit confident normalized date |
+| `pup_count_conflict` | `count_mismatch` | `message`, `target_refs`, `evidence_refs`, `recommended_action`, and review metadata |
+| `separated_count_conflict` | `count_mismatch` | `message`, `target_refs`, `evidence_refs`, `recommended_action`, and review metadata |
+| `litter_state_conflict` | `count_mismatch` or `impossible_date`, depending on the conflict | review metadata |
+| `stale_source_priority_conflict` | `missing_source_trace` when trace is absent, otherwise `open_focus_review_blocker` if it requires review before export | review metadata |
+
+Only add new schema enum values such as `litter_state_conflict`, `ambiguous_date_normalization`, or `stale_source_priority_conflict` if the implementation also updates `validation_report.schema.json`, schema validation tests, and artifact workflow tests in the same task slice.
 
 If any high severity check is blocked, `/api/exports/animal-sheet.xlsx?require_ready=true` should:
 
@@ -239,11 +254,13 @@ Add focused tests before implementation:
 6. ambiguous raw date remains raw/reviewable and does not appear as a confident normalized export date.
 7. blocked export creates validation report, export manifest, export log, and review item without XLSX response.
 8. repeated blocked export does not duplicate open review items.
+9. validation reports remain valid against `docs/artifact_contracts/validation_report.schema.json`.
 
 Recommended starting files:
 
 - `tests/test_artifact_workflow.py` for validation report and export manifest behavior.
 - `tests/test_mouse_event_evidence_enforcement.py` for litter/mouse event evidence rules.
+- `docs/artifact_contracts/validation_report.schema.json` only if new report-level `check_key` enum values are intentionally added.
 - `app/main.py` for export preview, validation report generation, and animal sheet XLSX endpoint.
 - `app/db.py` only if review item deduplication requires an index or new metadata field.
 
@@ -251,11 +268,12 @@ Recommended starting files:
 
 1. Add failing tests for date order and count mismatch using compact DB fixtures.
 2. Add pure validator helper that takes prepared rows/state and returns checks.
-3. Wire validator into `build_export_validation_report` and `/api/export-preview` row metadata.
+3. Wire validator into `build_export_validation_report` and `/api/export-preview` row metadata, mapping validator-specific conditions to schema-compatible validation report keys.
 4. Add review item persistence for high severity checks, with deduplication.
-5. Update animal sheet export 409 payload to include litter/date/count conflicts.
-6. Update UI copy only enough to show blocked row reasons and source refs.
-7. Run focused pytest, local export tests, and `git status --short`.
+5. If new validation report enum values are chosen, update the artifact schema and schema tests in the same task slice; otherwise keep the validator-specific labels in review metadata.
+6. Update animal sheet export 409 payload to include litter/date/count conflicts.
+7. Update UI copy only enough to show blocked row reasons and source refs.
+8. Run focused pytest, local export tests, and `git status --short`.
 
 ## Open Decisions
 
