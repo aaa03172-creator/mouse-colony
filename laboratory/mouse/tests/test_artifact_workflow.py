@@ -67,6 +67,89 @@ def test_animal_sheet_litter_validator_blocks_weaned_count_above_born() -> None:
     assert check["target_refs"] == ["litter_bad_count", "mating_bad_count"]
 
 
+def test_animal_sheet_litter_validator_blocks_pubs_count_mismatch() -> None:
+    rows = [
+        {
+            "sex": "F1",
+            "mouse_id": "12p",
+            "pubs": "2026-04-22 12p",
+            "litter_id": "litter_pubs_mismatch",
+            "mating_id": "mating_pubs_mismatch",
+            "mating_start_date": "2026-04-01",
+            "litter_birth_date": "2026-04-22",
+            "number_born": 10,
+            "source_record_id": "source_litter_pubs_mismatch",
+            "row_state": "ready",
+        }
+    ]
+
+    result = app_main.validate_animal_sheet_litter_date_counts(rows)
+
+    assert result["status"] == "blocked"
+    assert result["blocked_count"] == 1
+    check = result["checks"][0]
+    assert check["validator_check_key"] == "pubs_count_conflicts_with_number_born"
+    assert check["validation_report_check_key"] == "count_mismatch"
+    assert check["status"] == "blocked"
+    assert check["target_refs"] == ["litter_pubs_mismatch", "mating_pubs_mismatch"]
+
+
+def test_animal_sheet_litter_validator_warns_on_ambiguous_date_normalization() -> None:
+    rows = [
+        {
+            "sex": "F1",
+            "mouse_id": "10p",
+            "litter_id": "litter_ambiguous_date",
+            "mating_id": "mating_ambiguous_date",
+            "mating_start_date": "2026-04-01",
+            "litter_birth_date": "2026-04-22",
+            "litter_birth_date_review_status": "needs_review",
+            "number_born": 10,
+            "source_photo_ids": "photo_ambiguous_date",
+            "source_note_item_ids": "note_ambiguous_date",
+            "row_state": "ready",
+        }
+    ]
+
+    result = app_main.validate_animal_sheet_litter_date_counts(rows)
+
+    assert result["status"] == "warning"
+    assert result["blocked_count"] == 0
+    assert result["warning_count"] == 1
+    check = result["checks"][0]
+    assert check["validator_check_key"] == "ambiguous_litter_date_normalization"
+    assert check["validation_report_check_key"] == "impossible_date"
+    assert check["status"] == "warning"
+    assert check["target_refs"] == ["litter_ambiguous_date", "mating_ambiguous_date"]
+
+
+def test_animal_sheet_litter_validator_warns_on_source_record_without_photo_or_note() -> None:
+    rows = [
+        {
+            "sex": "F1",
+            "mouse_id": "10p",
+            "litter_id": "litter_source_only",
+            "mating_id": "mating_source_only",
+            "mating_start_date": "2026-04-01",
+            "litter_birth_date": "2026-04-22",
+            "number_born": 10,
+            "source_record_id": "source_litter_source_only",
+            "row_state": "ready",
+        }
+    ]
+
+    result = app_main.validate_animal_sheet_litter_date_counts(rows)
+
+    assert result["status"] == "warning"
+    assert result["blocked_count"] == 0
+    assert result["warning_count"] == 1
+    check = result["checks"][0]
+    assert check["validator_check_key"] == "litter_source_record_without_photo_or_note"
+    assert check["validation_report_check_key"] == "missing_source_trace"
+    assert check["status"] == "warning"
+    assert check["evidence_refs"] == ["source_litter_source_only"]
+
+
 def test_export_validation_report_maps_litter_checks_to_schema_keys() -> None:
     preview = {
         "blocked_review_items": 1,
@@ -115,6 +198,59 @@ def test_export_validation_report_maps_litter_checks_to_schema_keys() -> None:
     focus_check = next(item for item in report["checks"] if item["check_key"] == "open_focus_review_blocker")
     assert focus_check["status"] == "pass"
     assert report["status"] == "blocked"
+
+
+def test_export_validation_report_keeps_litter_warnings_non_blocking() -> None:
+    preview = {
+        "blocked_review_items": 0,
+        "focus_review_blocker_items": 0,
+        "latest_data_change_at": "2026-05-19T00:00:00Z",
+        "review_blockers": [],
+        "animal_sheet_rows": [
+            {
+                "mouse_id": "10p",
+                "litter_id": "litter_warning",
+                "source_record_id": "source_litter_warning",
+            }
+        ],
+        "animal_sheet_litter_validation": {
+            "source_layer": "export or view",
+            "status": "warning",
+            "blocked_count": 0,
+            "warning_count": 1,
+            "checks": [
+                {
+                    "validator_check_key": "litter_source_record_without_photo_or_note",
+                    "validation_report_check_key": "missing_source_trace",
+                    "status": "warning",
+                    "severity": "medium",
+                    "message": "Animal sheet litter row has source-record trace but no source photo or note-line trace.",
+                    "target_refs": ["litter_warning"],
+                    "evidence_refs": ["source_litter_warning"],
+                    "recommended_action": "Review source workbook/manual row.",
+                }
+            ],
+        },
+        "preview_rows": [],
+        "separation_rows": [],
+    }
+
+    report = app_main.build_export_validation_report(
+        preview,
+        export_type="animal_sheet_xlsx",
+        filename="animal.xlsx",
+    )
+
+    focus_check = next(item for item in report["checks"] if item["check_key"] == "open_focus_review_blocker")
+    warning_check = next(
+        item
+        for item in report["checks"]
+        if item["check_key"] == "missing_source_trace"
+        and "litter_source_record_without_photo_or_note" in item["message"]
+    )
+    assert focus_check["status"] == "pass"
+    assert warning_check["status"] == "warning"
+    assert report["status"] == "warning"
 
 
 def test_animal_sheet_export_blocks_litter_date_conflict_and_logs_review(
@@ -289,6 +425,165 @@ def test_animal_sheet_export_dedupes_litter_validation_review_items(
                 """
             ).fetchone()["count"]
             assert blocked_logs == 2
+    finally:
+        db.DB_PATH = old_db_path
+
+
+def test_litter_validation_conflict_does_not_block_separation_export(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    old_db_path = db.DB_PATH
+    db.DB_PATH = tmp_path / "mouse_lims.sqlite"
+    monkeypatch.setattr(app_main, "ARTIFACT_ROOT", tmp_path / "mousedb_artifacts")
+    try:
+        db.init_db()
+        with db.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO source_record
+                    (source_record_id, source_type, source_uri, source_label,
+                     raw_payload, imported_at, checksum, note)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "source_sep_litter_conflict",
+                    "manual_litter_entry",
+                    "",
+                    "Manual litter conflict fixture",
+                    "{}",
+                    "2026-05-19T00:00:00Z",
+                    "",
+                    "",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO mating_registry
+                    (mating_id, mating_label, strain_goal, start_date, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "mating_sep_conflict",
+                    "Mating Sep Conflict",
+                    "ApoM Tg/Tg",
+                    "2026-05-01",
+                    "active",
+                    "2026-05-19T00:00:00Z",
+                    "2026-05-19T00:00:00Z",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO litter_registry
+                    (litter_id, litter_label, mating_id, birth_date, number_born,
+                     number_alive, number_weaned, status, source_record_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "litter_sep_conflict",
+                    "F1",
+                    "mating_sep_conflict",
+                    "2026-04-13",
+                    10,
+                    10,
+                    None,
+                    "born",
+                    "source_sep_litter_conflict",
+                    "2026-05-19T00:00:01Z",
+                    "2026-05-19T00:00:01Z",
+                ),
+            )
+
+        preview = TestClient(app_main.app).get("/api/export-preview").json()
+        response = TestClient(app_main.app).get("/api/exports/separation.xlsx")
+
+        assert preview["animal_sheet_validation_blocker_items"] == 1
+        assert preview["focus_review_blocker_items"] == 0
+        assert response.status_code == 200
+        assert response.content[:4] == b"PK\x03\x04"
+    finally:
+        db.DB_PATH = old_db_path
+
+
+def test_litter_validation_review_is_not_double_counted_after_blocked_export(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    old_db_path = db.DB_PATH
+    db.DB_PATH = tmp_path / "mouse_lims.sqlite"
+    monkeypatch.setattr(app_main, "ARTIFACT_ROOT", tmp_path / "mousedb_artifacts")
+    try:
+        db.init_db()
+        with db.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO source_record
+                    (source_record_id, source_type, source_uri, source_label,
+                     raw_payload, imported_at, checksum, note)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "source_litter_count_stable",
+                    "manual_litter_entry",
+                    "",
+                    "Manual litter count stable fixture",
+                    "{}",
+                    "2026-05-19T00:00:00Z",
+                    "",
+                    "",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO mating_registry
+                    (mating_id, mating_label, strain_goal, start_date, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "mating_count_stable",
+                    "Mating Count Stable",
+                    "ApoM Tg/Tg",
+                    "2026-05-01",
+                    "active",
+                    "2026-05-19T00:00:00Z",
+                    "2026-05-19T00:00:00Z",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO litter_registry
+                    (litter_id, litter_label, mating_id, birth_date, number_born,
+                     number_alive, number_weaned, status, source_record_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "litter_count_stable",
+                    "F1",
+                    "mating_count_stable",
+                    "2026-04-13",
+                    10,
+                    10,
+                    None,
+                    "born",
+                    "source_litter_count_stable",
+                    "2026-05-19T00:00:01Z",
+                    "2026-05-19T00:00:01Z",
+                ),
+            )
+        client = TestClient(app_main.app)
+
+        first_preview = client.get("/api/export-preview").json()
+        first_export = client.get("/api/exports/animal-sheet.xlsx")
+        second_preview = client.get("/api/export-preview").json()
+
+        assert first_preview["blocked_review_items"] == 1
+        assert first_preview["focus_review_blocker_items"] == 0
+        assert first_preview["animal_sheet_validation_blocker_items"] == 1
+        assert first_export.status_code == 409
+        assert second_preview["blocked_review_items"] == 1
+        assert second_preview["focus_review_blocker_items"] == 0
+        assert second_preview["animal_sheet_validation_blocker_items"] == 1
     finally:
         db.DB_PATH = old_db_path
 
@@ -883,7 +1178,7 @@ def test_export_preview_reports_export_view_consistency_checks(tmp_path: Path) -
         assert preview["row_state_policy"] == {
             "source_layer": "export or view",
             "source_state_layer": "canonical structured state",
-            "states": ["ready", "blocked_by_review", "stale_after_correction"],
+            "states": ["ready", "blocked_by_review", "blocked_by_litter_conflict", "stale_after_correction"],
             "editable": False,
         }
         assert preview["preview_rows"][0]["row_state"] == "ready"

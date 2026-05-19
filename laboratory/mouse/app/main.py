@@ -43,6 +43,10 @@ ROI_PRESET_PATH = ROOT / "config" / "roi_presets.json"
 ARTIFACT_ROOT = Path(os.environ.get("MOUSEDB_ARTIFACT_ROOT", ROOT / "mousedb_artifacts")).expanduser().resolve()
 RUNTIME_OPENAI_API_KEY = ""
 ROI_CACHE_LOCK = threading.RLock()
+ANIMAL_SHEET_VALIDATION_ISSUES = {
+    "animal sheet count conflict",
+    "animal sheet litter/date conflict",
+}
 
 
 @asynccontextmanager
@@ -4922,6 +4926,13 @@ def _export_int(value: Any) -> int | None:
         return None
 
 
+def _export_p_count(value: Any) -> int | None:
+    match = re.search(r"(?<!\d)(\d+)\s*p\b", str(value or ""), flags=re.IGNORECASE)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
 def _animal_sheet_check_refs(row: dict[str, Any]) -> dict[str, list[str]]:
     refs = export_row_trace_refs(row)
     return {
@@ -4987,6 +4998,50 @@ def validate_animal_sheet_litter_date_counts(rows: list[dict[str, Any]]) -> dict
                     "target_refs": target_refs,
                     "evidence_refs": evidence_refs,
                     "recommended_action": "Review pup count and separation count before final animal sheet export.",
+                    "source_refs": refs,
+                }
+            )
+        pubs_count = _export_p_count(row.get("pubs"))
+        if born is not None and pubs_count is not None and pubs_count != born:
+            checks.append(
+                {
+                    "validator_check_key": "pubs_count_conflicts_with_number_born",
+                    "validation_report_check_key": "count_mismatch",
+                    "status": "blocked",
+                    "severity": "high",
+                    "message": "Animal sheet Pubs text count conflicts with the accepted litter pup count.",
+                    "target_refs": target_refs,
+                    "evidence_refs": evidence_refs,
+                    "recommended_action": "Review the Pubs text and accepted litter count before final animal sheet export.",
+                    "source_refs": refs,
+                }
+            )
+        date_review_status = str(row.get("litter_birth_date_review_status") or "").strip().lower()
+        if birth_date and date_review_status in {"check", "needs_review"}:
+            checks.append(
+                {
+                    "validator_check_key": "ambiguous_litter_date_normalization",
+                    "validation_report_check_key": "impossible_date",
+                    "status": "warning",
+                    "severity": "medium",
+                    "message": "Animal sheet litter date has a normalized value but remains marked for review.",
+                    "target_refs": target_refs,
+                    "evidence_refs": evidence_refs,
+                    "recommended_action": "Review ambiguous litter date evidence before relying on the animal sheet row.",
+                    "source_refs": refs,
+                }
+            )
+        if refs["source_record_ids"] and not unique_nonempty(refs["photo_ids"] + refs["note_item_ids"]):
+            checks.append(
+                {
+                    "validator_check_key": "litter_source_record_without_photo_or_note",
+                    "validation_report_check_key": "missing_source_trace",
+                    "status": "warning",
+                    "severity": "medium",
+                    "message": "Animal sheet litter row has source-record trace but no source photo or note-line trace.",
+                    "target_refs": target_refs,
+                    "evidence_refs": evidence_refs,
+                    "recommended_action": "Review source workbook/manual row and attach photo or note evidence when available.",
                     "source_refs": refs,
                 }
             )
@@ -12615,7 +12670,11 @@ def order_by_ids(rows: list[Any], id_column: str, ordered_ids: list[str]) -> lis
     return sorted([dict(row) for row in rows], key=lambda row: order.get(str(row[id_column]), len(order)))
 
 
-def open_review_attention_counts(conn: Any) -> dict[str, int]:
+def animal_sheet_validation_issue(issue: Any) -> bool:
+    return str(issue or "").strip().lower() in ANIMAL_SHEET_VALIDATION_ISSUES
+
+
+def open_review_attention_counts(conn: Any, *, exclude_animal_sheet_validation: bool = False) -> dict[str, int]:
     rows = conn.execute(
         """
         SELECT review.review_id, review.parse_id, review.severity, review.issue,
@@ -12632,6 +12691,8 @@ def open_review_attention_counts(conn: Any) -> dict[str, int]:
     counts = {"must_review": 0, "quick_check": 0, "trace_only": 0, "hidden_default": 0}
     for row in rows:
         payload = dict(row)
+        if exclude_animal_sheet_validation and animal_sheet_validation_issue(payload.get("issue")):
+            continue
         payload["confidence"] = payload.get("parse_confidence")
         parse_payload = json_object(payload.pop("parse_raw_payload", "{}"))
         payload.pop("parse_confidence", None)
@@ -12640,7 +12701,12 @@ def open_review_attention_counts(conn: Any) -> dict[str, int]:
     return counts
 
 
-def open_review_blockers(conn: Any, limit: int = 10) -> list[dict[str, Any]]:
+def open_review_blockers(
+    conn: Any,
+    limit: int = 10,
+    *,
+    exclude_animal_sheet_validation: bool = False,
+) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
         SELECT review.review_id, review.parse_id, review.severity, review.issue,
@@ -12669,6 +12735,8 @@ def open_review_blockers(conn: Any, limit: int = 10) -> list[dict[str, Any]]:
     blockers: list[dict[str, Any]] = []
     for row in rows:
         payload = dict(row)
+        if exclude_animal_sheet_validation and animal_sheet_validation_issue(payload.get("issue")):
+            continue
         payload["confidence"] = payload.get("parse_confidence")
         parse_payload = json_object(payload.pop("parse_raw_payload", "{}"))
         payload.pop("parse_confidence", None)
@@ -13752,7 +13820,7 @@ def export_separation_xlsx(query: str = "", require_ready: bool = True) -> Respo
         for row in filtered_rows
     ]
     filename = export_filename("separation", preview, query)
-    blocked_count = preview["blocked_review_items"]
+    blocked_count = preview.get("focus_review_blocker_items", preview["blocked_review_items"])
     if require_ready and blocked_count:
         provenance = create_export_provenance_artifacts(
             preview,
@@ -13961,7 +14029,7 @@ def export_row_state_policy() -> dict[str, Any]:
     return {
         "source_layer": "export or view",
         "source_state_layer": "canonical structured state",
-        "states": ["ready", "blocked_by_review", "stale_after_correction"],
+        "states": ["ready", "blocked_by_review", "blocked_by_litter_conflict", "stale_after_correction"],
         "editable": False,
     }
 
@@ -14036,11 +14104,14 @@ def load_export_note_evidence(conn: Any, note_item_ids: list[str]) -> dict[str, 
 def export_preview() -> dict[str, Any]:
     with connection() as conn:
         photos = conn.execute("SELECT COUNT(*) AS count FROM photo_log").fetchone()["count"]
-        review_rows = open_review_blockers(conn)
+        review_rows = open_review_blockers(conn, exclude_animal_sheet_validation=True)
         open_reviews = conn.execute(
             "SELECT COUNT(*) AS count FROM review_queue WHERE status = 'open'"
         ).fetchone()["count"]
-        review_attention_counts = open_review_attention_counts(conn)
+        review_attention_counts = open_review_attention_counts(
+            conn,
+            exclude_animal_sheet_validation=True,
+        )
         blocked_reviews = review_attention_counts.get("must_review", 0)
         genotype_blocker_rows = genotype_export_blockers(conn)
         genotype_blocker_count = len(genotype_blocker_rows)
