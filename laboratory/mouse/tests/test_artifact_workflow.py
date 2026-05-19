@@ -13,6 +13,38 @@ from app import db
 from app import main as app_main
 
 
+def assert_validation_report_contract(report: dict[str, object]) -> None:
+    schema_path = Path(__file__).resolve().parents[1] / "docs" / "artifact_contracts" / "validation_report.schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    allowed_top_level = set(schema["properties"])
+    required_top_level = set(schema["required"])
+    missing = required_top_level - set(report)
+    unexpected = set(report) - allowed_top_level
+    assert not missing
+    assert not unexpected
+    assert report["artifact_type"] == schema["properties"]["artifact_type"]["const"]
+    assert report["source_layer"] == schema["properties"]["source_layer"]["const"]
+    assert report["scope"] in schema["properties"]["scope"]["enum"]
+    assert report["status"] in schema["properties"]["status"]["enum"]
+
+    source_refs = report.get("source_refs", {})
+    assert isinstance(source_refs, dict)
+    allowed_source_ref_keys = set(schema["properties"]["source_refs"]["properties"])
+    assert not (set(source_refs) - allowed_source_ref_keys)
+
+    check_schema = schema["properties"]["checks"]["items"]["properties"]
+    allowed_check_keys = set(check_schema["check_key"]["enum"])
+    allowed_statuses = set(check_schema["status"]["enum"])
+    allowed_severities = set(check_schema["severity"]["enum"])
+    for check in report["checks"]:  # type: ignore[index]
+        assert isinstance(check, dict)
+        assert not (set(check) - set(check_schema))
+        assert check["check_key"] in allowed_check_keys
+        assert check["status"] in allowed_statuses
+        assert check["severity"] in allowed_severities
+        assert str(check["message"]).strip()
+
+
 def test_animal_sheet_litter_validator_blocks_birth_before_mating() -> None:
     rows = [
         {
@@ -198,6 +230,50 @@ def test_export_validation_report_maps_litter_checks_to_schema_keys() -> None:
     focus_check = next(item for item in report["checks"] if item["check_key"] == "open_focus_review_blocker")
     assert focus_check["status"] == "pass"
     assert report["status"] == "blocked"
+
+
+def test_animal_sheet_litter_validation_report_matches_artifact_schema() -> None:
+    preview = {
+        "blocked_review_items": 1,
+        "focus_review_blocker_items": 0,
+        "latest_data_change_at": "2026-05-19T00:00:00Z",
+        "review_blockers": [],
+        "animal_sheet_rows": [
+            {
+                "mouse_id": "10p",
+                "litter_id": "litter_schema",
+                "source_record_id": "source_litter_schema",
+            }
+        ],
+        "animal_sheet_litter_validation": {
+            "source_layer": "export or view",
+            "status": "blocked",
+            "blocked_count": 1,
+            "warning_count": 0,
+            "checks": [
+                {
+                    "validator_check_key": "litter_date_before_mating",
+                    "validation_report_check_key": "impossible_date",
+                    "status": "blocked",
+                    "severity": "high",
+                    "message": "Animal sheet litter birth date is earlier than the mating start date.",
+                    "target_refs": ["litter_schema"],
+                    "evidence_refs": ["source_litter_schema"],
+                    "recommended_action": "Confirm the litter date before export.",
+                }
+            ],
+        },
+        "preview_rows": [],
+        "separation_rows": [],
+    }
+
+    report = app_main.build_export_validation_report(
+        preview,
+        export_type="animal_sheet_xlsx",
+        filename="animal.xlsx",
+    )
+
+    assert_validation_report_contract(report)
 
 
 def test_export_validation_report_keeps_litter_warnings_non_blocking() -> None:
