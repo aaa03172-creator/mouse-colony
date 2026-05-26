@@ -134,6 +134,36 @@ The accuracy strategy should not mean "auto-accept more values." For this projec
 
 The user should feel the app removes clerical burden. Accuracy rules that create more clicking, more duplicate review cards, or more anxiety without preventing real mistakes should be treated as product bugs, even if they are technically correct.
 
+### Target User Experience
+
+The intended experience is output-first:
+
+```text
+User drops in cage-card photos or source workbooks
+-> MouseDB quietly preserves evidence, parses, validates, and checks provenance
+-> the user sees a workbook-shaped result, candidate state, or export readiness summary
+-> only the few risky or ambiguous items are shown as short correction tasks
+-> after correction, the result refreshes immediately
+```
+
+The user should not feel like they are operating an OCR pipeline, an evidence ledger, a validation engine, and an export manifest system. Those layers are necessary internally, but the default workflow should feel like:
+
+> I put in the photos, and MouseDB produced the animal sheet / separation sheet. It only asked about the few things it could not safely decide.
+
+Product implications:
+
+- Show the result first whenever possible: photo batch summary, canonical candidate preview, animal sheet preview, or export readiness.
+- Treat review as exception handling attached to the result, not as the main destination.
+- Prefer copy like `Animal sheet ready except 2 checks` over generic failure copy like `Export blocked`.
+- Let each blocker jump directly to the exact source photo, note line, row, or correction control.
+- Refresh the visible result immediately after a correction so the user sees progress.
+- Keep provenance, raw OCR, validation reports, manifests, and internal IDs available behind detail disclosures, not as the main screen.
+- Do not make the user approve every internal step. Ask only when the system would otherwise make a risky biological, identity, genotype, lineage, date, count, or export-handoff decision.
+
+Design rule:
+
+- The app may have many internal stages, but the user-facing story should be `input -> useful output -> small exception list`.
+
 ### Rule Severity Ladder
 
 Use three levels for new accuracy rules.
@@ -228,7 +258,7 @@ Suggested fatigue metrics:
 
 Default UI stance:
 
-- first viewport: must-review cards and active batch/photo context;
+- first viewport: generated result or export-shaped preview, plus must-review exceptions and active batch/photo context;
 - secondary chips: quick checks and warnings;
 - hidden by default: trace-only, fixtures, diagnostics, stale superseded drafts;
 - detail disclosure: raw OCR, raw payloads, internal IDs, full artifact metadata.
@@ -584,39 +614,43 @@ Suggested implementation:
 
 ## Recommended Next Implementation Order
 
-1. Fix ear-label review resolution safety.
+1. Reframe the primary workflow as output-first with attached exceptions.
+   - Files: `static/index.html`, `app/main.py`, `tests/test_artifact_workflow.py`, `tests/test_low_fatigue_ui_contracts.py`.
+   - Reason: the user should see the generated sheet/preview/readiness result first, with a small exception list attached, instead of feeling sent into a queue.
+
+2. Fix ear-label review resolution safety.
    - Files: `app/main.py`, `static/index.html`, `tests/test_review_attention.py`.
    - Reason: prevents review queue from diverging from note-line evidence.
 
-2. Block generic quick resolve for must-review items.
+3. Block generic quick resolve for must-review items.
    - Files: `app/main.py`, `static/index.html`, `tests/test_review_attention.py`, `tests/test_low_fatigue_ui_contracts.py`.
    - Reason: prevents high-risk review blockers from being dismissed without issue-specific evidence or correction.
 
-3. Fix `/api/review-items` evidence joins and snapshot fallback.
+4. Fix `/api/review-items` evidence joins and snapshot fallback.
    - Files: `app/main.py`, `tests/test_review_attention.py`.
    - Reason: restores traceability for fragile ear-label joins and photo-level review items.
 
-4. Fix pending parent action routing.
+5. Fix pending parent action routing.
    - Files: `app/main.py`, `static/index.html`, `tests/test_low_fatigue_ui_contracts.py`.
    - Reason: turns visible lineage uncertainty into an actionable workflow.
 
-5. Fix genotyping evidence mismatch validation.
+6. Fix genotyping evidence mismatch validation.
    - Files: `app/main.py`, `tests/test_genotyping_evidence_enforcement.py`.
    - Reason: closes an audit hole in high-risk genotype evidence.
 
-6. Add validation rule outcome telemetry and fatigue metrics.
+7. Add validation rule outcome telemetry and fatigue metrics.
    - Files: `app/main.py`, `tests/test_artifact_workflow.py`, possibly `scripts/report-private-accuracy.py`.
    - Reason: lets the team tune accuracy rules by observed false positives, correction outcomes, and review burden instead of intuition.
 
-7. Decide and implement CSV manifest contract.
+8. Decide and implement CSV manifest contract.
    - Files: `app/main.py`, `docs/artifact_contracts/export_manifest.schema.json`, `tests/test_artifact_workflow.py`.
    - Reason: aligns schema promises with export runtime behavior.
 
-8. Move active ApoM seed config out of `app/db.py`.
+9. Move active ApoM seed config out of `app/db.py`.
    - Files: `app/db.py`, `config/seeds/` or `fixtures/`, `tests/test_labeling_session_rules.py`, possibly `tests/test_hybrid_note_line_evaluator.py`.
    - Reason: removes project-specific seed coupling from active initialization.
 
-9. Continue UI workload and safety copy cleanup.
+10. Continue UI workload and safety copy cleanup.
    - Files: `static/index.html`, `app/main.py`, UI contract tests.
    - Reason: keeps the app feeling like a workload reducer rather than another queue to manage.
 
