@@ -408,6 +408,50 @@ def test_review_assistant_draft_anchors_type_specific_note_item_when_parse_has_m
         db.DB_PATH = old_db_path
 
 
+def test_review_assistant_draft_rejects_resolved_review_to_avoid_stale_form_fill(tmp_path: Path) -> None:
+    old_db_path = db.DB_PATH
+    try:
+        db.DB_PATH = tmp_path / "mouse_lims.sqlite"
+        db.init_db()
+        with db.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO parse_result
+                    (parse_id, source_name, raw_payload, parsed_at, status, confidence, needs_review)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("parse_resolved_draft", "manual_photo_transcription", "{}", "2026-05-12T11:30:00Z", "review", 80, 0),
+            )
+            conn.execute(
+                """
+                INSERT INTO review_queue
+                    (review_id, parse_id, severity, issue, current_value,
+                     suggested_value, review_reason, status, created_at, resolved_at, resolution_note)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "review_resolved_assistant_draft",
+                    "parse_resolved_draft",
+                    "Low",
+                    "AI-extracted photo transcription needs review",
+                    "old value",
+                    "new value",
+                    "Already resolved by the operator.",
+                    "resolved",
+                    "2026-05-12T11:31:00Z",
+                    "2026-05-12T11:32:00Z",
+                    "Operator already resolved this review.",
+                ),
+            )
+
+        response = TestClient(app).get("/api/review-items/review_resolved_assistant_draft/assistant-draft")
+
+        assert response.status_code == 409
+        assert response.json()["detail"] == "Assistant draft is only available for open review items."
+    finally:
+        db.DB_PATH = old_db_path
+
+
 def test_review_assistant_draft_404_for_missing_review(tmp_path: Path) -> None:
     old_db_path = db.DB_PATH
     try:

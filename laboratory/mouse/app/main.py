@@ -9917,6 +9917,8 @@ def audit_review_item(review_id: str) -> dict[str, Any]:
 def assistant_draft_review_item(review_id: str) -> dict[str, Any]:
     with connection() as conn:
         audit = review_item_audit_view(conn, review_id)
+    if str(audit["review"].get("status") or "") != "open":
+        raise HTTPException(status_code=409, detail="Assistant draft is only available for open review items.")
     return assistant_review_draft_from_audit(audit)
 
 
