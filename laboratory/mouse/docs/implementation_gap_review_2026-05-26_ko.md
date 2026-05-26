@@ -122,6 +122,116 @@ Remaining concern:
 
 - Domain-specific service flows still need review to ensure they actually pass the most specific photo/note/evidence refs into event details, not only a broad manual `source_record_id`.
 
+## Accuracy Strategy Review
+
+The accuracy strategy should not mean "auto-accept more values." For this project, accuracy improves when the system:
+
+- preserves raw evidence;
+- separates raw, normalized candidate, and accepted canonical values;
+- makes uncertainty visible at the right review level;
+- blocks only high-risk contradictions;
+- measures whether each rule helps or creates avoidable review fatigue.
+
+### Rule Severity Ladder
+
+Use three levels for new accuracy rules.
+
+#### Hard Blocker
+
+Use this only when false negatives are more dangerous than false positives.
+
+Good hard blockers:
+
+- birth date earlier than mating start date;
+- weaning/separation date earlier than birth date;
+- `number_weaned > number_born`;
+- one mouse mapped to multiple father/mother pairs without reviewed correction;
+- genotype confirmation evidence refs disagree, such as `photo_evidence_id` belonging to a different `source_photo_id`;
+- high-risk canonical/event writes without source photo, note item, photo evidence, or source record trace;
+- duplicate active mouse identity where source context does not resolve the conflict.
+
+Behavior:
+
+- block canonical apply or final export;
+- keep raw values intact;
+- create or expose a review item with source refs and before/after context;
+- write validation report/export manifest provenance when the blocker affects export.
+
+#### Review Warning
+
+Use this for plausible problems that may be normal under lab-specific timing, delayed entry, or unusual but valid colony operations.
+
+Good warning candidates:
+
+- gestation/weaning windows outside configurable thresholds;
+- source-record-only litter rows with no photo/note trace;
+- older photo capture time than the latest accepted state for the same mouse/cage;
+- ID continuity gaps such as `101, 102, 104` without a struck-through or loss/death explanation;
+- cage density / welfare warnings;
+- parent replacement and no-birth productivity warnings;
+- current pup count lower than born count but explained by source-backed death/loss/separation events.
+
+Behavior:
+
+- show in review/export readiness surfaces without automatically blocking unrelated exports;
+- record `validator_check_key`, source refs, and recommended action;
+- allow operator dismissal only with reason when the warning affects handoff decisions.
+
+#### Assistive Hint
+
+Use this for predictions or suggestions that can help the operator but should not decide state.
+
+Good hint candidates:
+
+- Mendelian genotype expectation;
+- parent candidate suggestions from mating/litter history;
+- OCR normalization suggestions for `1/l`, `0/O`, spacing, and punctuation;
+- strain or labeling-rule preset pre-selection from OCR text;
+- possible source-priority conflict where newer photo evidence may supersede older Excel evidence, before a deterministic conflict exists.
+
+Behavior:
+
+- label as `hint`, `candidate`, or `review suggestion`;
+- never overwrite raw evidence;
+- never unblock a hard blocker by itself;
+- require a review decision or policy-approved path before accepted state changes.
+
+### Measurement Loop For Rule Accuracy
+
+The next accuracy improvement should connect validation/review rules to outcome measurement. The repository already has private accuracy infrastructure (`scripts/report-private-accuracy.py`, review field outcomes, private runbooks), so the missing piece is to make rule outcomes visible enough to measure.
+
+Recommended additions:
+
+- keep stable `validator_check_key` values for every deterministic rule;
+- store review outcomes such as `accepted`, `corrected`, `dismissed_with_reason`, `false_positive`, and `policy_exception`;
+- aggregate rule-level counts in sanitized reports:
+  - fired count;
+  - blocker count;
+  - warning count;
+  - corrected count;
+  - false-positive count;
+  - median review seconds if available;
+  - export/apply blocks prevented;
+- include `rule_set_id` or threshold snapshot when a configurable policy triggers a warning;
+- add a small audit export for validation/review rules that contains only sanitized IDs/counts and no private raw photo text.
+
+This lets the lab tune thresholds without weakening safety. A rule that catches real mistakes should stay prominent. A rule that mostly creates false positives should be downgraded from hard blocker to warning, or from warning to hint.
+
+### Additional Accuracy Ideas To Consider
+
+These are not immediate implementation requirements, but they are good candidates for future slices:
+
+| Idea | First level | Why |
+| --- | --- | --- |
+| Source priority conflict check | Review warning | Newer reviewed photo/note evidence should outrank older Excel-derived rows, but delayed entry can be valid. |
+| Chronological overwrite warning | Review warning | Prevents old photos from silently reversing accepted newer state. |
+| Ambiguous normalized value quarantine | Hard blocker for canonical apply, warning for preview | Normalized dates/ear labels/genotypes should not become accepted if raw evidence is marked ambiguous. |
+| Rule-threshold snapshotting | Review warning metadata | Lets future reviewers understand which gestation/weaning/cage-density policy fired. |
+| Per-field confidence calibration | Assistive hint / measurement | Track whether confidence bands match actual correction rates. |
+| Cross-source agreement score | Assistive hint | OCR, AI draft, manual transcription, and legacy rows agreeing can lower review burden but should not replace source refs. |
+| Review fatigue budget | Measurement | Track how many warnings per photo/export are generated so accuracy rules do not overwhelm operators. |
+| Policy exception library | Review warning metadata | Repeated valid exceptions can become configurable policy rather than repeated dismissals. |
+
 ## Remaining Implementation Gaps
 
 ### P1: Ear-Label Review Can Still Resolve Without Updating Note Evidence
@@ -373,6 +483,31 @@ Suggested implementation:
 2. Start with movement and weaning, then mating/litter/offspring generation.
 3. Add tests proving event details include `source_photo_id`, `source_note_item_id`, and/or `photo_evidence_id` when available.
 
+### P2: Validation Rule Outcomes Are Not Yet Measurable Enough
+
+Boundary classification: review item / sanitized accuracy report.
+
+Current evidence:
+
+- `validate_animal_sheet_litter_date_counts()` emits stable `validator_check_key` values.
+- Review resolution already stores scoring audit and field-level outcome metadata.
+- Private accuracy reporter infrastructure exists for sanitized aggregate metrics.
+- There is no clear cross-cutting contract that maps each validation rule firing to later review outcomes such as false positive, corrected, policy exception, or dismissed with reason.
+
+Risk:
+
+- New accuracy rules can increase review burden without a feedback loop. The team may not know whether a rule catches real mistakes or mostly creates avoidable warnings.
+
+Suggested implementation:
+
+1. Add a small validation/review outcome contract:
+   - `validator_check_key`;
+   - `review_id` or artifact/check id;
+   - `outcome`: `accepted`, `corrected`, `dismissed_with_reason`, `false_positive`, `policy_exception`;
+   - sanitized rule metadata such as threshold snapshot or rule set id.
+2. Aggregate these outcomes in a local/sanitized report.
+3. Use the report to decide whether future rules should be hard blockers, warnings, or hints.
+
 ### P3: Draft Watermarked Animal Sheet Export Is Still An Open Product Decision
 
 Boundary classification: export or view.
@@ -431,15 +566,19 @@ Suggested implementation:
    - Files: `app/main.py`, `tests/test_genotyping_evidence_enforcement.py`.
    - Reason: closes an audit hole in high-risk genotype evidence.
 
-6. Decide and implement CSV manifest contract.
+6. Add validation rule outcome telemetry.
+   - Files: `app/main.py`, `tests/test_artifact_workflow.py`, possibly `scripts/report-private-accuracy.py`.
+   - Reason: lets the team tune accuracy rules by observed false positives and correction outcomes instead of intuition.
+
+7. Decide and implement CSV manifest contract.
    - Files: `app/main.py`, `docs/artifact_contracts/export_manifest.schema.json`, `tests/test_artifact_workflow.py`.
    - Reason: aligns schema promises with export runtime behavior.
 
-7. Move active ApoM seed config out of `app/db.py`.
+8. Move active ApoM seed config out of `app/db.py`.
    - Files: `app/db.py`, `config/seeds/` or `fixtures/`, `tests/test_labeling_session_rules.py`, possibly `tests/test_hybrid_note_line_evaluator.py`.
    - Reason: removes project-specific seed coupling from active initialization.
 
-8. Continue UI workload and safety copy cleanup.
+9. Continue UI workload and safety copy cleanup.
    - Files: `static/index.html`, `app/main.py`, UI contract tests.
    - Reason: improves operator clarity without changing canonical state.
 
