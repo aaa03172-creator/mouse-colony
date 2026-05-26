@@ -13,7 +13,7 @@ The animal-sheet litter validation direction is aligned with the project princip
 
 The main follow-up is not a data-model rewrite. It is a wording and count-contract cleanup so UI labels, preview fields, 409 payloads, and review lists all describe the same blocker category.
 
-## Findings To Batch
+## Resolved In Current Branch
 
 ### P2: Export blocker counters mix different concepts
 
@@ -48,6 +48,10 @@ Verification target:
   - a clearly named combined final-export count;
   - UI text that does not call the combined count "Focus blockers".
 
+Resolution status:
+
+Resolved in `b5e89e5` by adding `final_export_blocker_items`, keeping the existing combined `blocked_review_items` for compatibility, and updating the Export Center UI to display Focus Review blockers separately from final-export blockers.
+
 ### P2: Animal-sheet 409 response message points to the wrong review surface
 
 Files:
@@ -74,6 +78,12 @@ Suggested resolution:
 Verification target:
 
 - A focused test for animal-sheet-only validation conflict should assert the 409 message mentions animal-sheet litter/date/count review, not only Focus Review.
+
+Resolution status:
+
+Resolved in `b5e89e5` by adding a compact `blocker_summary` object and switching the animal-sheet 409 message based on whether the blocker is from Focus Review, animal-sheet validation, or both.
+
+## Findings To Batch
 
 ### P3: Active seed data still contains project-specific labeling rules
 
