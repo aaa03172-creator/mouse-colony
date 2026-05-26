@@ -132,6 +132,8 @@ The accuracy strategy should not mean "auto-accept more values." For this projec
 - blocks only high-risk contradictions;
 - measures whether each rule helps or creates avoidable review fatigue.
 
+The user should feel the app removes clerical burden. Accuracy rules that create more clicking, more duplicate review cards, or more anxiety without preventing real mistakes should be treated as product bugs, even if they are technically correct.
+
 ### Rule Severity Ladder
 
 Use three levels for new accuracy rules.
@@ -176,6 +178,7 @@ Behavior:
 - show in review/export readiness surfaces without automatically blocking unrelated exports;
 - record `validator_check_key`, source refs, and recommended action;
 - allow operator dismissal only with reason when the warning affects handoff decisions.
+- avoid interrupting the primary workflow unless the warning affects the next handoff or apply/export decision.
 
 #### Assistive Hint
 
@@ -195,6 +198,40 @@ Behavior:
 - never overwrite raw evidence;
 - never unblock a hard blocker by itself;
 - require a review decision or policy-approved path before accepted state changes.
+- keep hints out of primary workload counts and avoid showing them as tasks.
+
+### Fatigue Guardrails
+
+Accuracy work must be judged by operator effort as well as field correctness.
+
+Principles:
+
+- The default workload count should mean "things that need a human decision today," not all open uncertainty.
+- `Trace Only`, hidden diagnostic, fixture/sample, and assistive hint records should not appear as primary nav/topbar workload.
+- Repeated low-risk warnings from the same photo, parse, or export row should be grouped into one card.
+- Review cards should open at the source photo or evidence context, not force the user to hunt through tables.
+- A warning should have one obvious action: fix, accept with reason, defer, or open evidence.
+- The app should prefer review batches and keyboard-friendly confirmation for low-risk work, while still requiring explicit correction paths for high-risk identity, genotype, lineage, date, and count conflicts.
+- If a rule repeatedly produces `false_positive` or `dismissed_with_reason` outcomes, downgrade it or convert it into a configurable policy exception candidate.
+
+Suggested fatigue metrics:
+
+| Metric | Why it matters |
+| --- | --- |
+| `operator_workload_count` | Primary number the user sees; should exclude trace-only/hidden diagnostics. |
+| `must_review_count` | Shows true blockers that need attention before apply/export. |
+| `quick_check_count` | Shows low-friction confirmations, ideally grouped by photo or batch. |
+| `warnings_per_photo` | Prevents one noisy photo from creating many separate interruptions. |
+| `median_review_seconds` | Measures whether rules are slowing routine work. |
+| `false_positive_rate_by_validator_check_key` | Identifies rules that are accurate in theory but tiring in practice. |
+| `one_click_correction_link_rate` | Tracks whether blockers lead directly to the right correction surface. |
+
+Default UI stance:
+
+- first viewport: must-review cards and active batch/photo context;
+- secondary chips: quick checks and warnings;
+- hidden by default: trace-only, fixtures, diagnostics, stale superseded drafts;
+- detail disclosure: raw OCR, raw payloads, internal IDs, full artifact metadata.
 
 ### Measurement Loop For Rule Accuracy
 
@@ -403,7 +440,7 @@ Suggested implementation:
 3. Keep tests that use ApoM-specific data explicitly scoped as fixture/pilot tests.
 4. Add a test proving rule behavior comes from editable seed config, not a Python constant.
 
-### P2: Review Workload Count Contract Is Still Not Fully Aligned With UI Plan
+### P1: Review Workload Count Must Protect The User From Queue Fatigue
 
 Boundary classification: export/view read model.
 
@@ -415,14 +452,15 @@ Current evidence:
 
 Risk:
 
-- Hidden-default, trace-only, or diagnostic rows can inflate perceived operator workload.
+- Hidden-default, trace-only, or diagnostic rows can inflate perceived operator workload. If the topbar says there are many reviews when most are trace-only or fixture-derived, the app feels like it creates work instead of removing work.
 
 Suggested implementation:
 
 1. Add a dedicated review workload read model.
-2. Use `operator_workload_count` for primary nav/topbar.
+2. Use `operator_workload_count = must_review_count + selected quick_check_count` for primary nav/topbar.
 3. Show hidden/diagnostic/trace-only counts only in secondary diagnostics.
-4. Add tests in `tests/test_review_attention.py`, `tests/test_low_fatigue_ui_contracts.py`, and `tests/test_operations_home.py`.
+4. Group repeated warnings by photo, parse, or export row before counting them as user-visible work.
+5. Add tests in `tests/test_review_attention.py`, `tests/test_low_fatigue_ui_contracts.py`, and `tests/test_operations_home.py`.
 
 ### P2: External AI Readiness Copy Still Understates Approval Requirement
 
@@ -566,9 +604,9 @@ Suggested implementation:
    - Files: `app/main.py`, `tests/test_genotyping_evidence_enforcement.py`.
    - Reason: closes an audit hole in high-risk genotype evidence.
 
-6. Add validation rule outcome telemetry.
+6. Add validation rule outcome telemetry and fatigue metrics.
    - Files: `app/main.py`, `tests/test_artifact_workflow.py`, possibly `scripts/report-private-accuracy.py`.
-   - Reason: lets the team tune accuracy rules by observed false positives and correction outcomes instead of intuition.
+   - Reason: lets the team tune accuracy rules by observed false positives, correction outcomes, and review burden instead of intuition.
 
 7. Decide and implement CSV manifest contract.
    - Files: `app/main.py`, `docs/artifact_contracts/export_manifest.schema.json`, `tests/test_artifact_workflow.py`.
@@ -580,7 +618,7 @@ Suggested implementation:
 
 9. Continue UI workload and safety copy cleanup.
    - Files: `static/index.html`, `app/main.py`, UI contract tests.
-   - Reason: improves operator clarity without changing canonical state.
+   - Reason: keeps the app feeling like a workload reducer rather than another queue to manage.
 
 ## Verification Commands For Future Slices
 
