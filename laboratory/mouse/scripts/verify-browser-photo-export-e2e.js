@@ -16,6 +16,24 @@ function assert(condition, message) {
   }
 }
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function removeTempRoot(tempRoot) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      lastError = error;
+      await delay(250);
+    }
+  }
+  throw lastError;
+}
+
 function httpGet(url) {
   return new Promise((resolve, reject) => {
     const request = http.get(url, (response) => {
@@ -655,7 +673,7 @@ async function run() {
   } finally {
     if (browser) await browser.close();
     await stopServer(server);
-    fs.rmSync(tempRoot, { recursive: true, force: true });
+    await removeTempRoot(tempRoot);
     if (server.exitCode && server.exitCode !== 0) {
       process.stderr.write(serverOutput.join(""));
     }

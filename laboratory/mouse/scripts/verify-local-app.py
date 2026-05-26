@@ -2269,7 +2269,7 @@ def main() -> None:
                         "mating_id": mating_payload["mating_id"],
                         "birth_date": "2026-05-02",
                         "number_born": 10,
-                        "number_alive": 9,
+                        "number_alive": 10,
                         "status": "born",
                     },
                 )
@@ -2334,7 +2334,7 @@ def main() -> None:
                     "Animal sheet preview should include parent rows grouped by mating cage.",
                 )
                 assert_true(
-                    any(row["sex"] == "F1" and row["mouse_id"] == "9p" and row["status"] == "pre_weaning" for row in animal_preview["animal_sheet_rows"]),
+                    any(row["sex"] == "F1" and row["mouse_id"] == "10p" and row["status"] == "pre_weaning" for row in animal_preview["animal_sheet_rows"]),
                     "Animal sheet preview should include litter rows with pup counts and status.",
                 )
                 over_weaned = client.post(

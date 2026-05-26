@@ -4933,6 +4933,114 @@ def _export_p_count(value: Any) -> int | None:
     return int(match.group(1))
 
 
+COUNT_RECONCILIATION_EVENT_KEYWORDS = {
+    "death",
+    "dead",
+    "loss",
+    "lost",
+    "sacrifice",
+    "sacrificed",
+    "euthanasia",
+    "euthanized",
+    "separation",
+    "separated",
+    "wean",
+    "weaned",
+    "move",
+    "moved",
+    "transfer",
+    "transferred",
+}
+
+
+def _count_reconciliation_event_type(event_type: Any) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(event_type or "").lower()).strip("_")
+    tokens = {token for token in normalized.split("_") if token}
+    return normalized in COUNT_RECONCILIATION_EVENT_KEYWORDS or bool(tokens & COUNT_RECONCILIATION_EVENT_KEYWORDS)
+
+
+def _event_count_value(event: dict[str, Any]) -> int | None:
+    detail = event.get("details") if isinstance(event.get("details"), dict) else {}
+    for key in (
+        "count",
+        "delta_count",
+        "loss_count",
+        "death_count",
+        "pup_count",
+        "number_lost",
+        "number_dead",
+        "number_weaned",
+        "weaning_count",
+    ):
+        value = event.get(key)
+        if value is None and isinstance(detail, dict):
+            value = detail.get(key)
+        count = _export_int(value)
+        if count is not None:
+            return count
+    return None
+
+
+def _count_reconciliation_events(row: dict[str, Any]) -> list[dict[str, Any]]:
+    events = row.get("count_reconciliation_events")
+    if not isinstance(events, list):
+        return []
+    result = []
+    for event in events:
+        if isinstance(event, dict) and _count_reconciliation_event_type(event.get("event_type")):
+            result.append(event)
+    return result
+
+
+def _event_source_refs(event: dict[str, Any]) -> list[str]:
+    detail = event.get("details") if isinstance(event.get("details"), dict) else {}
+    return unique_nonempty(
+        [
+            event.get("source_record_id"),
+            event.get("source_photo_id"),
+            event.get("source_note_item_id"),
+            detail.get("source_record_id") if isinstance(detail, dict) else "",
+            detail.get("source_photo_id") if isinstance(detail, dict) else "",
+            detail.get("source_note_item_id") if isinstance(detail, dict) else "",
+            detail.get("photo_evidence_id") if isinstance(detail, dict) else "",
+        ]
+    )
+
+
+def _explained_count_delta(
+    *,
+    delta: int,
+    current_count: int,
+    events: list[dict[str, Any]],
+) -> tuple[bool, list[str], list[str]]:
+    contributing_event_refs: list[str] = []
+    contributing_evidence_refs: list[str] = []
+    sourced_delta_total = 0
+    sourced_current_total = 0
+    for event in events:
+        event_evidence_refs = _event_source_refs(event)
+        if not event_evidence_refs:
+            continue
+        event_refs = split_export_ref_values(event.get("event_id"))
+        event_type = str(event.get("event_type") or "").lower()
+        count = _event_count_value(event)
+        if count is None:
+            count = 1
+        contributing_event_refs.extend(event_refs)
+        contributing_evidence_refs.extend(event_evidence_refs)
+        if any(token in event_type for token in ("wean", "separat", "move", "transfer")):
+            sourced_current_total += count
+        else:
+            sourced_delta_total += count
+    contributing_event_refs = unique_nonempty(contributing_event_refs)
+    contributing_evidence_refs = unique_nonempty(contributing_evidence_refs)
+    if sourced_delta_total == delta and contributing_evidence_refs:
+        return True, contributing_event_refs, contributing_evidence_refs
+    if sourced_current_total == current_count and contributing_evidence_refs:
+        return True, contributing_event_refs, contributing_evidence_refs
+    return False, contributing_event_refs, contributing_evidence_refs
+
+
 def _animal_sheet_check_refs(row: dict[str, Any]) -> dict[str, list[str]]:
     refs = export_row_trace_refs(row)
     return {
@@ -5026,6 +5134,51 @@ def validate_animal_sheet_litter_date_counts(rows: list[dict[str, Any]]) -> dict
                 }
             )
         pubs_count = _export_p_count(row.get("pubs"))
+        current_pup_count = _export_p_count(row.get("mouse_id"))
+        if born is not None and current_pup_count is not None and current_pup_count < born:
+            delta = born - current_pup_count
+            count_events = _count_reconciliation_events(row)
+            explained, event_refs, event_evidence_refs = _explained_count_delta(
+                delta=delta,
+                current_count=current_pup_count,
+                events=count_events,
+            )
+            if explained:
+                checks.append(
+                    {
+                        "validator_check_key": "current_pup_count_delta_explained",
+                        "validation_report_check_key": "count_mismatch",
+                        "status": "warning",
+                        "severity": "medium",
+                        "message": "Animal sheet current pup count differs from born count, but source-backed events explain the difference.",
+                        "target_refs": target_refs + event_refs,
+                        "evidence_refs": unique_nonempty(evidence_refs + event_evidence_refs),
+                        "recommended_action": "Keep the source-backed loss/separation/weaning event trace with the animal sheet handoff.",
+                        "source_refs": {
+                            **refs,
+                            "event_ids": event_refs,
+                            "event_source_refs": event_evidence_refs,
+                        },
+                    }
+                )
+            else:
+                checks.append(
+                    {
+                        "validator_check_key": "current_pup_count_delta_without_event",
+                        "validation_report_check_key": "count_mismatch",
+                        "status": "blocked",
+                        "severity": "high",
+                        "message": "Animal sheet current pup count is lower than the born count without a source-backed loss, separation, or weaning event.",
+                        "target_refs": target_refs + event_refs,
+                        "evidence_refs": unique_nonempty(evidence_refs + event_evidence_refs),
+                        "recommended_action": "Review death/loss/separation evidence before final animal sheet export.",
+                        "source_refs": {
+                            **refs,
+                            "event_ids": event_refs,
+                            "event_source_refs": event_evidence_refs,
+                        },
+                    }
+                )
         if born is not None and pubs_count is not None and pubs_count != born:
             checks.append(
                 {
@@ -13972,6 +14125,24 @@ def export_animal_sheet_xlsx(query: str = "", require_ready: bool = True) -> Res
     if require_ready and blocked_count:
         validation_reviews: list[dict[str, Any]] = []
         animal_sheet_validation = preview.get("animal_sheet_litter_validation", {})
+        focus_blockers = int(preview.get("focus_review_blocker_items") or 0)
+        animal_sheet_validation_blockers = int(preview.get("animal_sheet_validation_blocker_items") or 0)
+        blocker_summary = {
+            "focus_review_blocker_items": focus_blockers,
+            "animal_sheet_validation_blocker_items": animal_sheet_validation_blockers,
+            "final_export_blocker_items": int(blocked_count or 0),
+        }
+        if focus_blockers and animal_sheet_validation_blockers:
+            blocked_message = (
+                "Resolve Focus Review blockers and animal sheet litter/date/count validation blockers "
+                "before final animal sheet workbook export."
+            )
+        elif animal_sheet_validation_blockers:
+            blocked_message = (
+                "Review animal sheet litter/date/count validation blockers before final animal sheet workbook export."
+            )
+        else:
+            blocked_message = "Resolve Focus Review blockers before final animal sheet workbook export."
         if isinstance(animal_sheet_validation, dict) and int(animal_sheet_validation.get("blocked_count") or 0):
             with connection() as conn:
                 parse_id = ensure_export_validation_parse(conn)
@@ -14003,8 +14174,9 @@ def export_animal_sheet_xlsx(query: str = "", require_ready: bool = True) -> Res
         raise HTTPException(
             status_code=409,
             detail={
-                "message": "Resolve Focus Review blockers before final animal sheet workbook export.",
+                "message": blocked_message,
                 "blocked_review_count": blocked_count,
+                "blocker_summary": blocker_summary,
                 "review_blockers": preview["review_blockers"],
                 "filename": filename,
                 "source_layer": "export or view",
@@ -14157,6 +14329,51 @@ def load_export_note_evidence(conn: Any, note_item_ids: list[str]) -> dict[str, 
     return {row["note_item_id"]: dict(row) for row in rows}
 
 
+def load_litter_count_reconciliation_events(conn: Any, litter_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+    litter_ids = [litter_id for litter_id in dict.fromkeys(litter_ids) if litter_id]
+    if not litter_ids:
+        return {}
+    placeholders = ", ".join("?" for _ in litter_ids)
+    rows = conn.execute(
+        f"""
+        SELECT event_id, mouse_id, event_type, event_date, related_entity_id,
+               related_entity_id AS event_litter_id,
+               source_record_id, details, created_at
+        FROM mouse_event
+        WHERE related_entity_type = 'litter'
+          AND related_entity_id IN ({placeholders})
+        ORDER BY event_date, created_at, event_id
+        """,
+        litter_ids,
+    ).fetchall()
+    mouse_rows = conn.execute(
+        f"""
+        SELECT event.event_id, event.mouse_id, event.event_type, event.event_date,
+               event.related_entity_id, mouse.litter_id AS event_litter_id,
+               event.source_record_id, event.details, event.created_at
+        FROM mouse_event event
+        JOIN mouse_master mouse ON mouse.mouse_id = event.mouse_id
+        WHERE mouse.litter_id IN ({placeholders})
+        ORDER BY event.event_date, event.created_at, event.event_id
+        """,
+        litter_ids,
+    ).fetchall()
+    events_by_litter: dict[str, list[dict[str, Any]]] = {}
+    seen_event_ids: set[str] = set()
+    for row in list(rows) + list(mouse_rows):
+        event = dict(row)
+        event_id = str(event.get("event_id") or "")
+        if event_id and event_id in seen_event_ids:
+            continue
+        if event_id:
+            seen_event_ids.add(event_id)
+        event["details"] = json_object(event.get("details"))
+        if not _count_reconciliation_event_type(event.get("event_type")):
+            continue
+        events_by_litter.setdefault(str(event["event_litter_id"] or ""), []).append(event)
+    return events_by_litter
+
+
 @app.get("/api/export-preview")
 def export_preview() -> dict[str, Any]:
     with connection() as conn:
@@ -14217,6 +14434,10 @@ def export_preview() -> dict[str, Any]:
             LIMIT 120
             """
         ).fetchall()
+        litter_count_events = load_litter_count_reconciliation_events(
+            conn,
+            [str(row["litter_id"] or "") for row in litter_rows],
+        )
         stale_state = export_staleness(conn)
         row_state = export_row_state(blocked_reviews, stale_state)
     rows = []
@@ -14403,6 +14624,7 @@ def export_preview() -> dict[str, Any]:
                     "number_alive": litter["number_alive"],
                     "number_weaned": litter["number_weaned"],
                     "weaning_date": litter["weaning_date"] or "",
+                    "count_reconciliation_events": litter_count_events.get(litter["litter_id"], []),
                     **row_state,
                     "export_note": "Litter row generated from accepted litter state.",
                 }
@@ -14442,6 +14664,7 @@ def export_preview() -> dict[str, Any]:
         "photos": photos,
         "parsed_results": parsed,
         "blocked_review_items": total_blocked_reviews,
+        "final_export_blocker_items": total_blocked_reviews,
         "focus_review_blocker_items": blocked_reviews,
         "animal_sheet_validation_blocker_items": validation_blockers,
         "open_review_items": open_reviews,

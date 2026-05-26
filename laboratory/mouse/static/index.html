@@ -7552,7 +7552,9 @@
       const commonReady = Boolean(preview.ready);
       const animalSheetReady = Boolean(preview.animal_sheet_ready ?? preview.ready);
       const allFinalReady = commonReady && animalSheetReady;
+      const focusReviewBlockerCount = Number(preview.focus_review_blocker_items || 0);
       const animalSheetValidationBlockerCount = Number(preview.animal_sheet_validation_blocker_items || 0);
+      const finalExportBlockerCount = Number(preview.final_export_blocker_items ?? preview.blocked_review_items ?? 0);
       const statusLabel = allFinalReady
         ? "Ready for final export"
         : commonReady && animalSheetValidationBlockerCount
@@ -7563,7 +7565,7 @@
       readinessCard.classList.toggle("blocked", !allFinalReady);
       document.getElementById("exportReadinessState").textContent = statusLabel;
       const badge = document.getElementById("exportReadinessBadge");
-      badge.textContent = allFinalReady ? "ready" : `${preview.blocked_review_items || 0} blocker(s)`;
+      badge.textContent = allFinalReady ? "ready" : `${finalExportBlockerCount} blocker(s)`;
       badge.className = allFinalReady ? "status" : "status warn";
       document.getElementById("exportPreview").textContent =
         allFinalReady
@@ -7577,7 +7579,8 @@
         ["Preview rows", rowCount],
         ["Separation rows", preview.separation_row_count || 0],
         ["Animal rows", preview.animal_sheet_row_count || 0],
-        ["Focus blockers", preview.blocked_review_items || 0],
+        ["Focus blockers", preview.focus_review_blocker_items || 0],
+        ["Final export blockers", preview.blocked_review_items || 0],
         ["Open reviews", preview.open_review_items || 0],
         ["Genotype blockers", preview.genotype_blocker_items || 0]
       ].map(([label, value]) => `
@@ -7587,7 +7590,7 @@
         ? "Final CSV and workbook downloads are ready. Generated files will be recorded in the export log."
         : commonReady && animalSheetValidationBlockerCount
           ? "Final CSV and separation workbook downloads are ready; animal sheet remains blocked by litter/date/count validation."
-        : `${preview.blocked_review_items || 0} Focus Review blocker(s) can still change exported values; quick checks stay reviewable without blocking export.`;
+        : `${focusReviewBlockerCount} Focus Review blocker(s) can still change exported values; quick checks stay reviewable without blocking export.`;
       setFinalExportActionState(preview);
       document.getElementById("exportFilenames").textContent =
         `Last export: ${preview.latest_generated_export_at || "none"}; ` +

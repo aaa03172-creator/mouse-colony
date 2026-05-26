@@ -93,6 +93,7 @@ Default rule: if a document or artifact is ambiguous, treat it as non-canonical 
 | `mousedb_cli_first_review_ko.md` | design review / non-canonical project note | CLI-first MouseDB boundary and integration review. |
 | `docs/mouse_db_assistant_integration_review_2026-05-11.md` | review item / non-canonical project documentation | MouseDB-specific adaptation of external assistant/API/MCP integration proposals, preserving MouseDB as the colony truth owner. |
 | `docs/mouse_data_utilization_implementation_review_2026-05-12_ko.md` | implementation/product review / review item | Reviews how extracted cage-card data can support mouse timelines, operational next actions, and future assistant/API/MCP wrappers against current implementation. |
+| `docs/code_review_backlog_2026-05-19_ko.md` | review item / non-canonical implementation review | Records current branch code-review findings and a batching map for later cross-branch review. |
 | `mousedb_open_design_artifact_workflow_review_ko.md` | implementation planning / non-canonical project note | Artifact lifecycle, preview-before-commit, validation report, and export provenance review. |
 | `open_source_acceleration_candidates_ko.md` | design guidance / non-canonical technical reference note | Possible implementation accelerators. |
 | `open_source_acceleration_doublecheck_ko.md` | design guidance / non-canonical technical reference note | License, fit, and MVP-risk double-check for accelerators. |

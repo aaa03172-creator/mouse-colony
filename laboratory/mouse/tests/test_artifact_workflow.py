@@ -126,6 +126,140 @@ def test_animal_sheet_litter_validator_blocks_pubs_count_mismatch() -> None:
     assert check["target_refs"] == ["litter_pubs_mismatch", "mating_pubs_mismatch"]
 
 
+def test_animal_sheet_litter_validator_blocks_unexplained_current_pup_delta() -> None:
+    rows = [
+        {
+            "sex": "F1",
+            "mouse_id": "8p",
+            "pubs": "2026-04-22 10p",
+            "litter_id": "litter_unexplained_delta",
+            "mating_id": "mating_unexplained_delta",
+            "mating_start_date": "2026-04-01",
+            "litter_birth_date": "2026-04-22",
+            "number_born": 10,
+            "number_alive": 8,
+            "source_photo_ids": "photo_unexplained_delta",
+            "row_state": "ready",
+        }
+    ]
+
+    result = app_main.validate_animal_sheet_litter_date_counts(rows)
+
+    assert result["status"] == "blocked"
+    check = next(item for item in result["checks"] if item["validator_check_key"] == "current_pup_count_delta_without_event")
+    assert check["validation_report_check_key"] == "count_mismatch"
+    assert check["status"] == "blocked"
+    assert check["target_refs"] == ["litter_unexplained_delta", "mating_unexplained_delta"]
+
+
+def test_animal_sheet_litter_validator_warns_on_event_explained_current_pup_delta() -> None:
+    rows = [
+        {
+            "sex": "F1",
+            "mouse_id": "8p",
+            "pubs": "2026-04-22 10p",
+            "litter_id": "litter_explained_delta",
+            "mating_id": "mating_explained_delta",
+            "mating_start_date": "2026-04-01",
+            "litter_birth_date": "2026-04-22",
+            "number_born": 10,
+            "number_alive": 8,
+            "source_photo_ids": "photo_explained_delta",
+            "count_reconciliation_events": [
+                {
+                    "event_id": "event_litter_loss_2",
+                    "event_type": "death",
+                    "count": 2,
+                    "source_record_id": "source_litter_loss_2",
+                }
+            ],
+            "row_state": "ready",
+        }
+    ]
+
+    result = app_main.validate_animal_sheet_litter_date_counts(rows)
+
+    assert result["status"] == "warning"
+    assert result["blocked_count"] == 0
+    check = next(item for item in result["checks"] if item["validator_check_key"] == "current_pup_count_delta_explained")
+    assert check["validation_report_check_key"] == "count_mismatch"
+    assert check["status"] == "warning"
+    assert check["evidence_refs"] == ["photo_explained_delta", "source_litter_loss_2"]
+
+
+def test_animal_sheet_litter_validator_blocks_when_count_and_source_are_on_different_events() -> None:
+    rows = [
+        {
+            "sex": "F1",
+            "mouse_id": "8p",
+            "pubs": "2026-04-22 10p",
+            "litter_id": "litter_split_event_delta",
+            "mating_id": "mating_split_event_delta",
+            "mating_start_date": "2026-04-01",
+            "litter_birth_date": "2026-04-22",
+            "number_born": 10,
+            "number_alive": 8,
+            "source_photo_ids": "photo_split_event_delta",
+            "count_reconciliation_events": [
+                {
+                    "event_id": "event_unsourced_loss_count",
+                    "event_type": "death",
+                    "count": 2,
+                },
+                {
+                    "event_id": "event_sourced_no_count",
+                    "event_type": "weaned",
+                    "source_record_id": "source_sourced_no_count",
+                },
+            ],
+            "row_state": "ready",
+        }
+    ]
+
+    result = app_main.validate_animal_sheet_litter_date_counts(rows)
+
+    assert result["status"] == "blocked"
+    check = next(item for item in result["checks"] if item["validator_check_key"] == "current_pup_count_delta_without_event")
+    assert check["status"] == "blocked"
+
+
+def test_animal_sheet_litter_validator_warns_on_sourced_per_pup_events_explaining_delta() -> None:
+    rows = [
+        {
+            "sex": "F1",
+            "mouse_id": "8p",
+            "pubs": "2026-04-22 10p",
+            "litter_id": "litter_per_pup_delta",
+            "mating_id": "mating_per_pup_delta",
+            "mating_start_date": "2026-04-01",
+            "litter_birth_date": "2026-04-22",
+            "number_born": 10,
+            "number_alive": 8,
+            "source_photo_ids": "photo_per_pup_delta",
+            "count_reconciliation_events": [
+                {
+                    "event_id": "event_loss_one",
+                    "event_type": "death",
+                    "source_record_id": "source_loss_one",
+                },
+                {
+                    "event_id": "event_loss_two",
+                    "event_type": "death",
+                    "source_record_id": "source_loss_two",
+                },
+            ],
+            "row_state": "ready",
+        }
+    ]
+
+    result = app_main.validate_animal_sheet_litter_date_counts(rows)
+
+    assert result["status"] == "warning"
+    check = next(item for item in result["checks"] if item["validator_check_key"] == "current_pup_count_delta_explained")
+    assert check["status"] == "warning"
+    assert check["evidence_refs"] == ["photo_per_pup_delta", "source_loss_one", "source_loss_two"]
+
+
 def test_animal_sheet_litter_validator_warns_on_ambiguous_date_normalization() -> None:
     rows = [
         {
@@ -701,6 +835,234 @@ def test_export_preview_surfaces_source_backed_ambiguous_litter_date_warning(
         db.DB_PATH = old_db_path
 
 
+def test_export_preview_uses_source_backed_events_to_explain_pup_delta(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    old_db_path = db.DB_PATH
+    db.DB_PATH = tmp_path / "mouse_lims.sqlite"
+    monkeypatch.setattr(app_main, "ARTIFACT_ROOT", tmp_path / "mousedb_artifacts")
+    try:
+        db.init_db()
+        with db.connection() as conn:
+            for source_id in ["source_litter_explained_real", "source_litter_loss_real"]:
+                conn.execute(
+                    """
+                    INSERT INTO source_record
+                        (source_record_id, source_type, source_uri, source_label,
+                         raw_payload, imported_at, checksum, note)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        source_id,
+                        "manual_litter_entry",
+                        "",
+                        source_id,
+                        "{}",
+                        "2026-05-19T00:00:00Z",
+                        "",
+                        "",
+                    ),
+                )
+            conn.execute(
+                """
+                INSERT INTO mating_registry
+                    (mating_id, mating_label, strain_goal, start_date, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "mating_explained_real",
+                    "Mating Explained Real",
+                    "ApoM Tg/Tg",
+                    "2026-04-01",
+                    "active",
+                    "2026-05-19T00:00:00Z",
+                    "2026-05-19T00:00:00Z",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO litter_registry
+                    (litter_id, litter_label, mating_id, birth_date, number_born,
+                     number_alive, number_weaned, status, source_record_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "litter_explained_real",
+                    "F1",
+                    "mating_explained_real",
+                    "2026-04-22",
+                    10,
+                    8,
+                    None,
+                    "pre_weaning",
+                    "source_litter_explained_real",
+                    "2026-05-19T00:00:01Z",
+                    "2026-05-19T00:00:01Z",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO mouse_master
+                    (mouse_id, display_id, raw_strain_text, litter_id, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "mouse_litter_loss_real",
+                    "LOSS-REAL",
+                    "ApoM Tg/Tg",
+                    "litter_explained_real",
+                    "dead",
+                    "2026-05-19T00:00:01Z",
+                    "2026-05-19T00:00:01Z",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO mouse_event
+                    (event_id, mouse_id, event_type, event_date, related_entity_type,
+                     related_entity_id, source_record_id, details, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "event_litter_loss_real",
+                    "mouse_litter_loss_real",
+                    "death",
+                    "2026-04-25",
+                    "litter",
+                    "litter_explained_real",
+                    "source_litter_loss_real",
+                    json.dumps({"count": 2}, ensure_ascii=False),
+                    "2026-05-19T00:00:02Z",
+                ),
+            )
+
+        preview = app_main.export_preview()
+
+        validation = preview["animal_sheet_litter_validation"]
+        assert validation["blocked_count"] == 0
+        check_keys = {check["validator_check_key"] for check in validation["checks"]}
+        assert "current_pup_count_delta_explained" in check_keys
+        assert "current_pup_count_delta_without_event" not in check_keys
+    finally:
+        db.DB_PATH = old_db_path
+
+
+def test_export_preview_uses_mouse_scoped_events_to_explain_pup_delta(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    old_db_path = db.DB_PATH
+    db.DB_PATH = tmp_path / "mouse_lims.sqlite"
+    monkeypatch.setattr(app_main, "ARTIFACT_ROOT", tmp_path / "mousedb_artifacts")
+    try:
+        db.init_db()
+        with db.connection() as conn:
+            for source_id in ["source_litter_mouse_event_real", "source_mouse_loss_one", "source_mouse_loss_two"]:
+                conn.execute(
+                    """
+                    INSERT INTO source_record
+                        (source_record_id, source_type, source_uri, source_label,
+                         raw_payload, imported_at, checksum, note)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        source_id,
+                        "manual_litter_entry",
+                        "",
+                        source_id,
+                        "{}",
+                        "2026-05-19T00:00:00Z",
+                        "",
+                        "",
+                    ),
+                )
+            conn.execute(
+                """
+                INSERT INTO mating_registry
+                    (mating_id, mating_label, strain_goal, start_date, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "mating_mouse_event_real",
+                    "Mating Mouse Event Real",
+                    "ApoM Tg/Tg",
+                    "2026-04-01",
+                    "active",
+                    "2026-05-19T00:00:00Z",
+                    "2026-05-19T00:00:00Z",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO litter_registry
+                    (litter_id, litter_label, mating_id, birth_date, number_born,
+                     number_alive, number_weaned, status, source_record_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "litter_mouse_event_real",
+                    "F1",
+                    "mating_mouse_event_real",
+                    "2026-04-22",
+                    10,
+                    8,
+                    None,
+                    "pre_weaning",
+                    "source_litter_mouse_event_real",
+                    "2026-05-19T00:00:01Z",
+                    "2026-05-19T00:00:01Z",
+                ),
+            )
+            for index, source_id in enumerate(["source_mouse_loss_one", "source_mouse_loss_two"], start=1):
+                mouse_id = f"mouse_loss_real_{index}"
+                conn.execute(
+                    """
+                    INSERT INTO mouse_master
+                        (mouse_id, display_id, raw_strain_text, litter_id, status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        mouse_id,
+                        f"LOSS-{index}",
+                        "ApoM Tg/Tg",
+                        "litter_mouse_event_real",
+                        "dead",
+                        "2026-05-19T00:00:01Z",
+                        "2026-05-19T00:00:01Z",
+                    ),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO mouse_event
+                        (event_id, mouse_id, event_type, event_date, related_entity_type,
+                         related_entity_id, source_record_id, details, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        f"event_mouse_loss_real_{index}",
+                        mouse_id,
+                        "death",
+                        "2026-04-25",
+                        "mouse",
+                        mouse_id,
+                        source_id,
+                        "{}",
+                        "2026-05-19T00:00:02Z",
+                    ),
+                )
+
+        preview = app_main.export_preview()
+
+        validation = preview["animal_sheet_litter_validation"]
+        assert validation["blocked_count"] == 0
+        check_keys = {check["validator_check_key"] for check in validation["checks"]}
+        assert "current_pup_count_delta_explained" in check_keys
+        assert "current_pup_count_delta_without_event" not in check_keys
+    finally:
+        db.DB_PATH = old_db_path
+
+
 def test_litter_validation_conflict_does_not_block_separation_export(
     tmp_path: Path,
     monkeypatch,
@@ -853,6 +1215,14 @@ def test_litter_validation_review_is_not_double_counted_after_blocked_export(
         assert first_preview["focus_review_blocker_items"] == 0
         assert first_preview["animal_sheet_validation_blocker_items"] == 1
         assert first_export.status_code == 409
+        detail = first_export.json()["detail"]
+        assert "animal sheet litter/date/count" in detail["message"]
+        assert "Focus Review blockers" not in detail["message"]
+        assert detail["blocker_summary"] == {
+            "focus_review_blocker_items": 0,
+            "animal_sheet_validation_blocker_items": 1,
+            "final_export_blocker_items": 1,
+        }
         assert second_preview["blocked_review_items"] == 1
         assert second_preview["focus_review_blocker_items"] == 0
         assert second_preview["animal_sheet_validation_blocker_items"] == 1
@@ -951,6 +1321,9 @@ def test_static_export_buttons_use_per_export_readiness_flags() -> None:
     assert "Animal sheet review required" in html
     assert "Animal sheet review" in html
     assert "CSV and separation ready; animal sheet needs litter review." in html
+    assert '["Focus blockers", preview.focus_review_blocker_items || 0]' in html
+    assert '["Final export blockers", preview.blocked_review_items || 0]' in html
+    assert '["Focus blockers", preview.blocked_review_items || 0]' not in html
     assert 'button.disabled = !ready;' not in html
 
 
