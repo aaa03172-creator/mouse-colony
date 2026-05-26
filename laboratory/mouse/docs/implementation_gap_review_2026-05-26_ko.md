@@ -136,12 +136,12 @@ The user should feel the app removes clerical burden. Accuracy rules that create
 
 ### Target User Experience
 
-The intended experience is output-first:
+The intended experience is output-first, but never safety-blind:
 
 ```text
 User drops in cage-card photos or source workbooks
 -> MouseDB quietly preserves evidence, parses, validates, and checks provenance
--> the user sees a workbook-shaped result, candidate state, or export readiness summary
+-> the user sees a draft workbook-shaped result, candidate state, or export readiness summary
 -> only the few risky or ambiguous items are shown as short correction tasks
 -> after correction, the result refreshes immediately
 ```
@@ -153,8 +153,9 @@ The user should not feel like they are operating an OCR pipeline, an evidence le
 Product implications:
 
 - Show the result first whenever possible: photo batch summary, canonical candidate preview, animal sheet preview, or export readiness.
+- Label the result honestly as `draft`, `preview`, `blocked`, or `final-ready`; never make a blocked preview look like a final workbook.
 - Treat review as exception handling attached to the result, not as the main destination.
-- Prefer copy like `Animal sheet ready except 2 checks` over generic failure copy like `Export blocked`.
+- Prefer copy like `Animal sheet draft generated; 2 checks before final export` over generic failure copy like `Export blocked`.
 - Let each blocker jump directly to the exact source photo, note line, row, or correction control.
 - Refresh the visible result immediately after a correction so the user sees progress.
 - Keep provenance, raw OCR, validation reports, manifests, and internal IDs available behind detail disclosures, not as the main screen.
@@ -162,7 +163,8 @@ Product implications:
 
 Design rule:
 
-- The app may have many internal stages, but the user-facing story should be `input -> useful output -> small exception list`.
+- The app may have many internal stages, but the user-facing story should be `input -> useful draft/output -> small exception list -> final when safe`.
+- Output-first must not bypass preview-before-commit, source trace, validation report, or final-export gates.
 
 ### Rule Severity Ladder
 
@@ -262,6 +264,14 @@ Default UI stance:
 - secondary chips: quick checks and warnings;
 - hidden by default: trace-only, fixtures, diagnostics, stale superseded drafts;
 - detail disclosure: raw OCR, raw payloads, internal IDs, full artifact metadata.
+
+Interruption policy:
+
+- Interrupt immediately only for hard blockers that affect the current apply/export action.
+- Batch warnings by photo, cage/card, litter, or export row before showing them.
+- Show hints only inline beside the field they help with, not as separate tasks.
+- Do not increase the topbar workload count after every internal validation pass unless a new human decision is genuinely required.
+- When several checks point to the same source row or note line, show one combined correction task with all reasons listed inside it.
 
 ### Measurement Loop For Rule Accuracy
 
@@ -616,7 +626,7 @@ Suggested implementation:
 
 1. Reframe the primary workflow as output-first with attached exceptions.
    - Files: `static/index.html`, `app/main.py`, `tests/test_artifact_workflow.py`, `tests/test_low_fatigue_ui_contracts.py`.
-   - Reason: the user should see the generated sheet/preview/readiness result first, with a small exception list attached, instead of feeling sent into a queue.
+   - Reason: the user should see the generated draft/preview/readiness result first, with a small exception list attached, instead of feeling sent into a queue. This is a presentation and navigation slice only; it must not weaken canonical apply or final-export gates.
 
 2. Fix ear-label review resolution safety.
    - Files: `app/main.py`, `static/index.html`, `tests/test_review_attention.py`.
