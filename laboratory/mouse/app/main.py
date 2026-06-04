@@ -12763,9 +12763,9 @@ def log_workbook_export(
     state_watermark: str = "",
 ) -> None:
     note = (
-        "Blocked final XLSX export because Focus Review blockers remain."
+        "Blocked final export because Focus Review blockers remain."
         if status == "blocked"
-        else "XLSX generated from workbook preview."
+        else "Generated export from local preview."
     )
     provenance_bits = [
         f"manifest={manifest_artifact_path}" if manifest_artifact_path else "",
@@ -13966,30 +13966,6 @@ def export_mice_csv(query: str = "", require_ready: bool = False) -> Response:
         suffix = "_filtered" if query.strip() else ""
         filename = f"mouse_records{suffix}.csv"
         export_status = "blocked" if require_ready and blocked_review_count else "generated"
-        note = (
-            "Blocked final CSV export because Focus Review blockers remain."
-            if export_status == "blocked"
-            else "Generated from local mouse records CSV endpoint."
-        )
-        conn.execute(
-            """
-            INSERT INTO export_log
-                (export_id, export_type, filename, query, row_count,
-                 blocked_review_count, status, exported_at, note)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                new_id("export"),
-                "mouse_csv",
-                filename,
-                query.strip(),
-                row_count,
-                blocked_review_count,
-                export_status,
-                utc_now(),
-                note,
-            ),
-        )
         if export_status == "blocked":
             blocked_error = {
                 "blocked_review_count": blocked_review_count,
@@ -13998,6 +13974,26 @@ def export_mice_csv(query: str = "", require_ready: bool = False) -> Response:
                 "filename": filename,
                 "source_layer": "export or view",
             }
+    provenance = create_export_provenance_artifacts(
+        export_preview(),
+        export_type="mouse_csv",
+        filename=filename,
+        query=query,
+        status=export_status,
+        row_count=row_count,
+        blocked_review_count=blocked_review_count,
+    )
+    log_workbook_export(
+        "mouse_csv",
+        filename,
+        query,
+        row_count,
+        blocked_review_count,
+        export_status,
+        manifest_artifact_path=provenance["manifest_artifact_path"],
+        validation_report_id=provenance["validation_report_id"],
+        state_watermark=provenance["state_watermark"],
+    )
 
     if blocked_error:
         raise HTTPException(
@@ -14005,6 +14001,9 @@ def export_mice_csv(query: str = "", require_ready: bool = False) -> Response:
             detail={
                 "message": "Resolve Focus Review blockers before final export.",
                 **blocked_error,
+                "export_manifest_path": provenance["manifest_artifact_path"],
+                "validation_report_id": provenance["validation_report_id"],
+                "validation_report_path": provenance["validation_report_path"],
             },
         )
 
@@ -14064,25 +14063,26 @@ def export_genotyping_worklist_csv(query: str = "") -> Response:
         blocked_review_count = export_review_blocker_count(conn)
         suffix = "_filtered" if query.strip() else ""
         filename = f"genotyping_worklist{suffix}.csv"
-        conn.execute(
-            """
-            INSERT INTO export_log
-                (export_id, export_type, filename, query, row_count,
-                 blocked_review_count, status, exported_at, note)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                new_id("export"),
-                "genotyping_worklist_csv",
-                filename,
-                query.strip(),
-                row_count,
-                blocked_review_count,
-                "generated",
-                utc_now(),
-                "Generated as a companion genotyping worklist export without changing lab workbook shape.",
-            ),
-        )
+    provenance = create_export_provenance_artifacts(
+        export_preview(),
+        export_type="genotyping_worklist_csv",
+        filename=filename,
+        query=query,
+        status="generated",
+        row_count=row_count,
+        blocked_review_count=blocked_review_count,
+    )
+    log_workbook_export(
+        "genotyping_worklist_csv",
+        filename,
+        query,
+        row_count,
+        blocked_review_count,
+        "generated",
+        manifest_artifact_path=provenance["manifest_artifact_path"],
+        validation_report_id=provenance["validation_report_id"],
+        state_watermark=provenance["state_watermark"],
+    )
 
     return Response(
         content=output.getvalue(),

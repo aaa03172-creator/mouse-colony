@@ -45,6 +45,26 @@ def assert_validation_report_contract(report: dict[str, object]) -> None:
         assert str(check["message"]).strip()
 
 
+def assert_export_manifest_contract(manifest: dict[str, object]) -> None:
+    schema_path = Path(__file__).resolve().parents[1] / "docs" / "artifact_contracts" / "export_manifest.schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    allowed_top_level = set(schema["properties"])
+    required_top_level = set(schema["required"])
+    missing = required_top_level - set(manifest)
+    unexpected = set(manifest) - allowed_top_level
+    assert not missing
+    assert not unexpected
+    assert manifest["artifact_type"] == schema["properties"]["artifact_type"]["const"]
+    assert manifest["source_layer"] == schema["properties"]["source_layer"]["const"]
+    assert manifest["export_type"] in schema["properties"]["export_type"]["enum"]
+    assert manifest["status"] in schema["properties"]["status"]["enum"]
+
+    source_refs = manifest.get("source_refs", {})
+    assert isinstance(source_refs, dict)
+    allowed_source_ref_keys = set(schema["properties"]["source_refs"]["properties"])
+    assert not (set(source_refs) - allowed_source_ref_keys)
+
+
 def test_animal_sheet_litter_validator_blocks_birth_before_mating() -> None:
     rows = [
         {
@@ -1389,6 +1409,119 @@ def test_litter_validation_review_does_not_block_mouse_csv_after_blocked_animal_
         assert animal_response.status_code == 409
         assert csv_response.status_code == 200
         assert csv_response.text.startswith("mouse_id,display_id")
+        with db.connection() as conn:
+            export_log = conn.execute(
+                """
+                SELECT export_type, filename, status, note
+                FROM export_log
+                WHERE export_type = 'mouse_csv'
+                ORDER BY exported_at DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        assert export_log["filename"] == "mouse_records.csv"
+        assert export_log["status"] == "generated"
+        provenance = app_main.parse_export_log_provenance(export_log["note"])
+        assert provenance["export_manifest_path"]
+        assert provenance["validation_report_id"]
+        manifest_path = Path(provenance["export_manifest_path"])
+        assert manifest_path.exists()
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        report_path = Path(manifest["validation_report_path"])
+        assert report_path.exists()
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        assert_export_manifest_contract(manifest)
+        assert manifest["artifact_type"] == "export_manifest"
+        assert manifest["export_type"] == "mouse_csv"
+        assert manifest["status"] == "generated"
+        assert manifest["validation_report_id"] == report["report_id"]
+        assert report["artifact_type"] == "validation_report"
+        assert report["scope"] == "export"
+    finally:
+        db.DB_PATH = old_db_path
+
+
+def test_genotyping_worklist_csv_writes_export_manifest_and_validation_report(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    old_db_path = db.DB_PATH
+    db.DB_PATH = tmp_path / "mouse_lims.sqlite"
+    monkeypatch.setattr(app_main, "ARTIFACT_ROOT", tmp_path / "mousedb_artifacts")
+    try:
+        db.init_db()
+        with db.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO source_record
+                    (source_record_id, source_type, source_uri, source_label,
+                     raw_payload, imported_at, checksum, note)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "source_gt_csv_manifest",
+                    "manual_genotyping_entry",
+                    "",
+                    "Manual genotyping worklist fixture",
+                    "{}",
+                    "2026-05-19T00:00:00Z",
+                    "",
+                    "",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO mouse_master
+                    (mouse_id, display_id, raw_strain_text, status,
+                     genotyping_status, sample_id, sample_date,
+                     source_record_id, last_verified_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "mouse_gt_csv_manifest",
+                    "GTCSV1",
+                    "ApoM Tg/Tg",
+                    "active",
+                    "sampled",
+                    "GTCSV1",
+                    "2026-05-19",
+                    "source_gt_csv_manifest",
+                    "2026-05-19T00:00:00Z",
+                ),
+            )
+        client = TestClient(app_main.app)
+
+        response = client.get("/api/exports/genotyping-worklist.csv")
+
+        assert response.status_code == 200
+        assert response.text.startswith("display_id,ear_label")
+        with db.connection() as conn:
+            export_log = conn.execute(
+                """
+                SELECT export_type, filename, status, row_count, note
+                FROM export_log
+                WHERE export_type = 'genotyping_worklist_csv'
+                ORDER BY exported_at DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        assert export_log["filename"] == "genotyping_worklist.csv"
+        assert export_log["status"] == "generated"
+        assert export_log["row_count"] == 1
+        provenance = app_main.parse_export_log_provenance(export_log["note"])
+        assert provenance["export_manifest_path"]
+        assert provenance["validation_report_id"]
+        manifest_path = Path(provenance["export_manifest_path"])
+        assert manifest_path.exists()
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        report_path = Path(manifest["validation_report_path"])
+        assert report_path.exists()
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        assert_export_manifest_contract(manifest)
+        assert manifest["export_type"] == "genotyping_worklist_csv"
+        assert manifest["row_count"] == 1
+        assert manifest["validation_report_path"] == str(report_path)
+        assert report["artifact_type"] == "validation_report"
     finally:
         db.DB_PATH = old_db_path
 
