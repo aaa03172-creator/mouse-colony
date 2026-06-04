@@ -463,6 +463,92 @@ def test_export_validation_report_keeps_litter_warnings_non_blocking() -> None:
     assert report["status"] == "warning"
 
 
+def test_export_validation_report_includes_sanitized_outcome_and_fatigue_metrics() -> None:
+    preview = {
+        "blocked_review_items": 1,
+        "focus_review_blocker_items": 1,
+        "latest_data_change_at": "2026-05-19T00:00:00Z",
+        "review_blockers": [
+            {
+                "review_id": "review_blocker_metrics",
+                "issue": "PRIVATE RAW NOTE SHOULD NOT ENTER METRICS",
+            }
+        ],
+        "animal_sheet_rows": [
+            {
+                "mouse_id": "10p",
+                "litter_id": "litter_metrics",
+                "source_record_id": "source_litter_metrics",
+            }
+        ],
+        "animal_sheet_litter_validation": {
+            "source_layer": "export or view",
+            "status": "warning",
+            "blocked_count": 0,
+            "warning_count": 1,
+            "checks": [
+                {
+                    "validator_check_key": "litter_source_record_without_photo_or_note",
+                    "validation_report_check_key": "missing_source_trace",
+                    "status": "warning",
+                    "severity": "medium",
+                    "message": "PRIVATE RAW LITTER TEXT SHOULD NOT ENTER METRICS",
+                    "target_refs": ["litter_metrics"],
+                    "evidence_refs": ["source_litter_metrics"],
+                    "recommended_action": "Review source workbook/manual row.",
+                }
+            ],
+        },
+        "preview_rows": [],
+        "separation_rows": [],
+    }
+
+    report = app_main.build_export_validation_report(
+        preview,
+        export_type="animal_sheet_xlsx",
+        filename="animal.xlsx",
+    )
+
+    assert_validation_report_contract(report)
+    metrics = report["validation_outcome_metrics"]
+    assert metrics == {
+        "source_layer": "export or view",
+        "measurement_boundary": "sanitized validation/review outcome telemetry",
+        "fired_count": 2,
+        "pass_count": 1,
+        "blocker_count": 1,
+        "warning_count": 1,
+        "operator_workload_count": 1,
+        "review_fatigue_units": 2,
+        "outcome_counts": {
+            "accepted": 0,
+            "corrected": 0,
+            "dismissed_with_reason": 0,
+            "false_positive": 0,
+            "policy_exception": 0,
+        },
+        "by_check_key": [
+            {
+                "check_key": "missing_source_trace",
+                "fired_count": 1,
+                "blocker_count": 0,
+                "warning_count": 1,
+                "pass_count": 1,
+                "false_positive_count": 0,
+            },
+            {
+                "check_key": "open_focus_review_blocker",
+                "fired_count": 1,
+                "blocker_count": 1,
+                "warning_count": 0,
+                "pass_count": 0,
+                "false_positive_count": 0,
+            },
+        ],
+    }
+    assert "PRIVATE RAW" not in json.dumps(metrics)
+
+
 def test_animal_sheet_export_blocks_litter_date_conflict_and_logs_review(
     tmp_path: Path,
     monkeypatch,

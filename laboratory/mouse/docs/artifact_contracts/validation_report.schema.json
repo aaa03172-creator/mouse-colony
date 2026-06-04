@@ -132,6 +132,85 @@
         }
       }
     },
+    "validation_outcome_metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "source_layer": {
+          "const": "export or view"
+        },
+        "measurement_boundary": {
+          "const": "sanitized validation/review outcome telemetry"
+        },
+        "fired_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pass_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "blocker_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "warning_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "operator_workload_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "review_fatigue_units": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "outcome_counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "accepted": { "type": "integer", "minimum": 0 },
+            "corrected": { "type": "integer", "minimum": 0 },
+            "dismissed_with_reason": { "type": "integer", "minimum": 0 },
+            "false_positive": { "type": "integer", "minimum": 0 },
+            "policy_exception": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "by_check_key": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "check_key": {
+                "type": "string"
+              },
+              "fired_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "blocker_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "warning_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "pass_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "false_positive_count": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          }
+        }
+      }
+    },
     "summary": {
       "type": "string"
     }

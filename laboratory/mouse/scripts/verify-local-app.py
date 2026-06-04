@@ -2717,6 +2717,11 @@ def main() -> None:
                         json={
                             "resolution_note": "Verified blocker before releasing ready CSV export.",
                             "resolved_value": item.get("suggested_value") or item.get("current_value") or "",
+                            "correction_entity_type": "review_item",
+                            "correction_entity_id": item["review_id"],
+                            "correction_field_name": "evidence_checked",
+                            "correction_before_value": item.get("current_value") or "",
+                            "correction_after_value": item.get("suggested_value") or item.get("current_value") or "",
                         },
                     )
                     assert_true(

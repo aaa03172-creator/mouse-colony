@@ -1372,7 +1372,7 @@ async function main() {
         review_id: "review_follow_done",
         parse_id: "parse_follow_done",
         status: "open",
-        issue: "Resolved count check",
+        issue: "Low-confidence strain alias",
         severity: "Medium",
         attention_level: "quick_check",
         priority: "medium",
@@ -1413,7 +1413,7 @@ async function main() {
   });
   assert(
     reviewFollowThrough.stateKind === "success" &&
-      reviewFollowThrough.statusText.includes("Review resolved: Resolved count check") &&
+      reviewFollowThrough.statusText.includes("Review resolved: Low-confidence strain alias") &&
       reviewFollowThrough.statusText.includes("Next: Next count check") &&
       reviewFollowThrough.statusText.includes("next-card.png") &&
       reviewFollowThrough.statusText.includes("Current detail remains anchored"),
