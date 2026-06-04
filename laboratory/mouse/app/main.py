@@ -10678,6 +10678,8 @@ def is_generic_review_item_resolution(payload: ReviewResolutionCreate) -> bool:
             bool(payload.field_review_outcome),
         ]
     )
+    if has_specific_resolution_payload:
+        return False
     if correction_entity_type == "review_item" and correction_field_name == "reviewed_value":
         return True
     return not any([correction_entity_type, correction_field_name, has_specific_resolution_payload])

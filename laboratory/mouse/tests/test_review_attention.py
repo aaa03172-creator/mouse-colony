@@ -642,6 +642,69 @@ def test_high_severity_review_rejects_generic_quick_resolution(tmp_path: Path) -
         db.DB_PATH = old_db_path
 
 
+def test_high_severity_review_allows_specific_canonical_mapping_decision(tmp_path: Path) -> None:
+    old_db_path = db.DB_PATH
+    try:
+        parse_id, _ = seed_numeric_note_parse(tmp_path, "high_specific_mapping", [{"raw": "318 R'", "strike": "none"}])
+        review_id = "review_high_specific_mapping"
+        with db.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO review_queue
+                    (review_id, parse_id, severity, issue, current_value,
+                     suggested_value, review_reason, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    review_id,
+                    parse_id,
+                    "High",
+                    "Photo transcription differs from predecessor Excel",
+                    json.dumps({"manual": {"display_id": "MT318", "strain": "ApoM"}, "legacy": {"summary": {"display_id": "MT318"}}}),
+                    json.dumps({"legacy": {"summary": {"display_id": "MT318", "strain": "ApoM"}}}),
+                    "Reviewer chose to preserve the reviewed difference as a draft candidate.",
+                    "open",
+                    "2026-05-04T00:07:00Z",
+                ),
+            )
+
+        result = resolve_review_item(
+            review_id,
+            ReviewResolutionCreate(
+                resolution_note="Reviewed source photo and mapped the difference into a draft candidate.",
+                resolved_value="draft candidate",
+                legacy_decision="map_to_canonical_candidate",
+                correction_entity_type="review_item",
+                correction_entity_id=review_id,
+                correction_field_name="reviewed_value",
+                correction_before_value="Photo transcription differs from predecessor Excel",
+                correction_after_value="draft candidate",
+            ),
+        )
+
+        assert result["canonical_candidate_id"]
+        with db.connection() as conn:
+            review = conn.execute(
+                "SELECT status, resolved_at FROM review_queue WHERE review_id = ?",
+                (review_id,),
+            ).fetchone()
+            candidate = conn.execute(
+                """
+                SELECT status, review_id
+                FROM canonical_candidate
+                WHERE candidate_id = ?
+                """,
+                (result["canonical_candidate_id"],),
+            ).fetchone()
+
+        assert review["status"] == "resolved"
+        assert review["resolved_at"]
+        assert candidate["status"] == "draft"
+        assert candidate["review_id"] == review_id
+    finally:
+        db.DB_PATH = old_db_path
+
+
 def test_resolving_review_preserves_scoring_audit_taxonomy_without_private_payloads(tmp_path: Path) -> None:
     old_db_path = db.DB_PATH
     try:
