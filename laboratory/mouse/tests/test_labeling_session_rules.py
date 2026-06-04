@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
@@ -18,6 +19,22 @@ from app.main import (
     request_genotyping,
     write_note_items_and_mouse_candidates,
 )
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_active_labeling_rule_seed_config_lives_outside_db_module() -> None:
+    db_source = (ROOT / "app" / "db.py").read_text(encoding="utf-8")
+    seed_config = ROOT / "config" / "seeds" / "labeling_rule_sets.json"
+
+    assert seed_config.exists()
+    assert "ApoM Tg/Tg 2026-05-06" not in db_source
+    assert "label_rule_apom_tgtg_20260506" not in db_source
+    payload = json.loads(seed_config.read_text(encoding="utf-8"))
+    assert payload["source_layer"] == "cache"
+    assert payload["seed_scope"] == "pilot/example labeling rule configuration"
+    assert payload["rule_sets"][0]["rule_set_id"] == "label_rule_apom_tgtg_20260506"
 
 
 def test_labeling_rule_schema_seeds_default_apom_rule(tmp_path):

@@ -311,6 +311,25 @@ def assert_single_biological_review_item(conn, *, issue_contains: str) -> None:
     assert row["needs_review"] == 1
 
 
+def assert_action_log_after_evidence_refs(conn, *, action_type: str, target_id: str) -> None:
+    row = conn.execute(
+        """
+        SELECT after_value
+        FROM action_log
+        WHERE action_type = ?
+          AND target_id = ?
+        """,
+        (action_type, target_id),
+    ).fetchone()
+    assert row is not None
+    after = json.loads(row["after_value"])
+    assert after["evidence_refs"] == {
+        "source_photo_id": "photo_domain_event",
+        "source_note_item_id": "note_domain_event",
+        "photo_evidence_id": "pe_domain_event",
+    }
+
+
 def test_high_risk_mouse_event_requires_evidence_before_canonical_commit(tmp_path) -> None:
     old_db_path = db.DB_PATH
     db.DB_PATH = tmp_path / "mouse_lims.sqlite"
@@ -760,6 +779,37 @@ def test_cage_move_preserves_specific_photo_note_evidence_refs(tmp_path) -> None
         db.DB_PATH = old_db_path
 
 
+def test_cage_move_action_log_preserves_specific_photo_note_evidence_refs(tmp_path) -> None:
+    old_db_path = db.DB_PATH
+    db.DB_PATH = tmp_path / "mouse_lims.sqlite"
+    try:
+        db.init_db()
+        with db.connection() as conn:
+            seed_cage_move_state(conn)
+            seed_photo_note_evidence(conn)
+
+        move_mouse_to_cage(
+            "mouse_event_evidence",
+            MouseCageMove(
+                cage_id="cage_new",
+                note="Reviewed cage-card movement note.",
+                moved_at="2026-05-09T02:00:00Z",
+                source_photo_id="photo_domain_event",
+                source_note_item_id="note_domain_event",
+                photo_evidence_id="pe_domain_event",
+            ),
+        )
+
+        with db.connection() as conn:
+            assert_action_log_after_evidence_refs(
+                conn,
+                action_type="mouse_cage_moved",
+                target_id="mouse_event_evidence",
+            )
+    finally:
+        db.DB_PATH = old_db_path
+
+
 def test_cage_move_rejects_invalid_evidence_ref_before_partial_write(tmp_path) -> None:
     old_db_path = db.DB_PATH
     db.DB_PATH = tmp_path / "mouse_lims.sqlite"
@@ -916,6 +966,37 @@ def test_weaning_preserves_specific_photo_note_evidence_refs(tmp_path) -> None:
         assert details["source_photo_id"] == "photo_domain_event"
         assert details["source_note_item_id"] == "note_domain_event"
         assert details["photo_evidence_id"] == "pe_domain_event"
+    finally:
+        db.DB_PATH = old_db_path
+
+
+def test_weaning_action_log_preserves_specific_photo_note_evidence_refs(tmp_path) -> None:
+    old_db_path = db.DB_PATH
+    db.DB_PATH = tmp_path / "mouse_lims.sqlite"
+    try:
+        db.init_db()
+        with db.connection() as conn:
+            seed_litter_wean_state(conn)
+            seed_photo_note_evidence(conn)
+
+        wean_litter(
+            "litter_event_evidence",
+            LitterWeanCreate(
+                weaning_date="2026-05-09",
+                number_weaned=1,
+                note="Reviewed cage-card weaning note.",
+                source_photo_id="photo_domain_event",
+                source_note_item_id="note_domain_event",
+                photo_evidence_id="pe_domain_event",
+            ),
+        )
+
+        with db.connection() as conn:
+            assert_action_log_after_evidence_refs(
+                conn,
+                action_type="litter_weaned",
+                target_id="litter_event_evidence",
+            )
     finally:
         db.DB_PATH = old_db_path
 

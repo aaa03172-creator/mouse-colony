@@ -85,6 +85,10 @@
           "type": "array",
           "items": { "type": "string" }
         },
+        "source_record_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
         "mouse_ids": {
           "type": "array",
           "items": { "type": "string" }

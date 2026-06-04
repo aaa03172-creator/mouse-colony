@@ -1076,6 +1076,23 @@
     .review-source-preview img:not([src]) {
       display: none;
     }
+    .source-photo-frame {
+      display: grid;
+      gap: 6px;
+    }
+    .source-photo-missing {
+      display: none;
+      border: 1px dashed var(--line);
+      border-radius: 6px;
+      padding: 16px;
+      background: #f8faf9;
+      color: var(--muted);
+      font-size: 13px;
+      text-align: center;
+    }
+    .source-photo-frame[data-source-photo-state="missing"] .source-photo-missing {
+      display: block;
+    }
     .review-source-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3386,6 +3403,7 @@
         <label>
           Status
           <select id="reviewStatusFilter">
+            <option value="workload">Actionable Workload</option>
             <option value="focus">Focus Review</option>
             <option value="quick">Quick Check</option>
             <option value="trace">Trace Only</option>
@@ -4071,6 +4089,7 @@
       const rowStateLabels = {
         ready: "Ready",
         blocked_by_review: "Blocked",
+        blocked_by_litter_conflict: "Litter conflict",
         stale_after_correction: "Stale"
       };
       const rowStateLabel = rowStateLabels[rowState] || (previewReady && !hasUncertainty ? "Ready" : "Blocked");
@@ -4519,7 +4538,9 @@
     function filteredReviews(reviews) {
       return reviews.filter((item) => {
         const statusMatch =
-          reviewStatusFilter === "focus"
+          reviewStatusFilter === "workload"
+            ? item.status === "open" && ["must_review", "quick_check"].includes(item.attention_level)
+            : reviewStatusFilter === "focus"
             ? item.status === "open" && item.attention_level === "must_review"
             : reviewStatusFilter === "quick"
               ? item.status === "open" && item.attention_level === "quick_check"
@@ -4702,13 +4723,61 @@
       if (!panel) return;
       const cards = Array.isArray(model?.cards) ? model.cards : [];
       const workload = model?.workload_summary || {};
+      const outputFirst = model?.output_first || {};
+      const outputExceptions = Array.isArray(outputFirst.exceptions) ? outputFirst.exceptions : [];
+      const overflowAction = outputFirst.overflow_action || {};
       const emptyState = model?.empty_state || {};
       const fabricatedRecords = emptyState.fabricated_records === true;
       const hasWorkloadCounts = Number.isFinite(workload.must_review) && Number.isFinite(workload.quick_check);
       const counts = model?.load_error || !hasWorkloadCounts
         ? ["Counts unavailable"]
         : [`Must review ${Number(workload.must_review || 0)}`, `Quick check ${Number(workload.quick_check || 0)}`];
+      const outputFirstHtml = outputFirst.show_result_first ? `
+        <div class="review-output-first">
+          <div class="section-kicker">
+            <div>
+              <h3>${escapeHtml(outputFirst.primary_output_label || "Animal sheet draft")}</h3>
+              <p>${escapeHtml(outputFirst.headline || "Draft generated; review exceptions before final export.")}</p>
+            </div>
+            <span class="chip">${escapeHtml(String(outputFirst.result_status || "draft").replaceAll("-", " "))}</span>
+          </div>
+          <div class="review-queue-summary">
+            <span class="chip">small exception list ${escapeHtml(outputFirst.exception_count || 0)}</span>
+            <span class="chip">showing ${escapeHtml(outputFirst.visible_exception_count || outputExceptions.length || 0)}</span>
+            <span class="chip">remaining ${escapeHtml(outputFirst.remaining_exception_count || 0)}</span>
+            <span class="chip">Must review ${escapeHtml(outputFirst.must_review_count || 0)}</span>
+            <span class="chip">Quick check ${escapeHtml(outputFirst.quick_check_count || 0)}</span>
+            <span class="chip">Final export ${outputFirst.final_export_blocked ? "blocked" : "ready"}</span>
+            ${overflowAction.label ? `
+              <button class="open-output-exception-overflow" type="button"
+                data-target-view="${escapeHtml(overflowAction.target_view || "review")}">
+                ${escapeHtml(overflowAction.label)}
+              </button>
+            ` : ""}
+          </div>
+          ${outputExceptions.length ? `
+            <div class="review-meta">
+              ${outputExceptions.slice(0, 3).map((item) => `
+                <button class="open-output-exception-review" type="button"
+                  data-review-id="${escapeHtml(item.target_review_id || item.review_id || "")}"
+                  data-target-view="${escapeHtml(item.target_view || "review")}"
+                  data-source-photo-id="${escapeHtml(item.source_photo_id || "")}">
+                  ${escapeHtml(item.action_label || "Inspect source evidence")}
+                </button>
+                ${item.source_photo_id ? `
+                  <button class="open-output-exception-photo" type="button"
+                    data-source-photo-id="${escapeHtml(item.source_photo_id)}"
+                    aria-label="Open source photo for ${escapeHtml(item.issue || "review item")}">Photo</button>
+                ` : ""}
+                <span class="chip">${escapeHtml(item.issue || "Review item")}</span>
+                <span class="chip">${escapeHtml(item.attention_level || "review")}</span>
+              `).join("")}
+            </div>
+          ` : ""}
+        </div>
+      ` : "";
       const summary = `
+        ${outputFirstHtml}
         <div class="section-kicker">
           <div>
             <h3>Focus Review</h3>
@@ -4762,6 +4831,46 @@
           </div>
         `;
       }).join("")}`;
+      panel.querySelectorAll(".open-output-exception-review").forEach((button) => {
+        button.addEventListener("click", () => openOutputExceptionReview(button.dataset.reviewId, button.dataset.targetView));
+      });
+      panel.querySelectorAll(".open-output-exception-photo").forEach((button) => {
+        button.addEventListener("click", async () => openOutputExceptionPhoto(button.dataset.sourcePhotoId));
+      });
+      panel.querySelectorAll(".open-output-exception-overflow").forEach((button) => {
+        button.addEventListener("click", async () => openOutputExceptionOverflow(button.dataset.targetView));
+      });
+    }
+
+    async function openOutputExceptionReview(reviewId, targetView = "review") {
+      if (!reviewId) return;
+      reviewStatusFilter = "focus";
+      reviewSeverityFilter = "all";
+      reviewEvidenceFilter = "all";
+      reviewRoleFilter = "all";
+      selectedReviewId = reviewId;
+      setActiveView(targetView || "review");
+      await refresh();
+    }
+
+    async function openOutputExceptionPhoto(photoId) {
+      if (!photoId) return;
+      setActiveView("photo");
+      selectedTranscriptionPhotoId = photoId;
+      await refresh();
+      setTranscriptionPhoto(photoId);
+      document.getElementById("viewSubtitle").textContent =
+        "Source photo opened from output-first exception. Raw photo and extracted evidence remain traceable.";
+    }
+
+    async function openOutputExceptionOverflow(targetView = "review") {
+      reviewStatusFilter = "workload";
+      reviewSeverityFilter = "all";
+      reviewEvidenceFilter = "all";
+      reviewRoleFilter = "all";
+      selectedReviewId = "";
+      setActiveView("review");
+      await refresh();
     }
 
     function operationsRiskTone(task) {
@@ -5196,7 +5305,7 @@
             <p>Unconfirmed relationships are not inferred.</p>
             <div class="review-meta">
               ${pendingFields.map((field) => `<span class="chip warn">${escapeHtml(field.field)} ${escapeHtml(field.value || "Parent pending")}</span>`).join("")}
-              ${attentionLinks.map((link) => `<button class="open-focus-review" type="button" data-view-target="review">${escapeHtml(link.label || "Open Focus Review")}</button>`).join("")}
+              ${attentionLinks.map((link) => `<button class="open-pedigree-action" type="button" data-view-target="${escapeHtml(link.target_view || "review")}" data-action-reason="${escapeHtml(link.reason || "")}">${escapeHtml(link.label || "Open Focus Review")}</button>`).join("")}
             </div>
           </div>
         ` : `
@@ -5229,8 +5338,12 @@
           </div>
         </div>
       `;
-      panel.querySelectorAll(".open-focus-review").forEach((button) => {
-        button.addEventListener("click", () => setActiveView("review"));
+      panel.querySelectorAll(".open-pedigree-action").forEach((button) => {
+        button.addEventListener("click", () => {
+          const targetView = button.dataset.viewTarget || "review";
+          if (targetView === "mouse-detail" && mouse.mouse_id) selectedAuditMouseId = mouse.mouse_id;
+          setActiveView(targetView);
+        });
       });
     }
 
@@ -5516,14 +5629,20 @@
       ).join("");
     }
 
+    function reviewAllowsQuickResolve(item) {
+      if (!item || item.status !== "open" || item?.attention_level !== "quick_check") return false;
+      const safeQuickResolveIssues = [
+        "Low-confidence strain alias",
+        "fixture auto-filled by policy"
+      ];
+      const issueKey = String(item.issue || "").trim().toLowerCase();
+      return safeQuickResolveIssues.some((issue) => issue.toLowerCase() === issueKey);
+    }
+
     function reviewResolutionControls(item) {
       if (!item || item.status !== "open") return escapeHtml(item?.resolution_note || "Resolved");
-      const quickLabel = item.attention_level === "must_review" ? "Accept after check" : "Looks OK";
-      const allowQuickResolve = ![
-        "Unlabeled numeric note needs review",
-        "Ear label needs review",
-        "Legacy strain registry candidate requires review"
-      ].includes(item.issue);
+      const quickLabel = "Looks OK";
+      const allowQuickResolve = reviewAllowsQuickResolve(item);
       const currentCandidate = (() => {
         try {
           return JSON.parse(item.current_value || "{}");
@@ -5794,6 +5913,7 @@
     }
 
     function reviewResolutionPayload(button, item, allowAutoNote) {
+      if (!button) return null;
       const container = button.closest(".review-actions");
       if (!container) {
         return {
@@ -5936,6 +6056,7 @@
     }
 
     async function submitReviewResolution(button, item, allowAutoNote) {
+      if (!button) return;
       const payload = reviewResolutionPayload(button, item, allowAutoNote);
       if (!payload) return;
       const container = button.closest(".review-actions");
@@ -6053,9 +6174,17 @@
         item.review_id && "review-item",
         item.card_snapshot_id && ["excel-row", "Card snapshot"]
       ];
+      const sourcePhotoFrame = item.image_url
+        ? `<div class="source-photo-frame" data-source-photo-state="ready">
+            <img src="${escapeHtml(item.image_url)}" alt="Source cage-card photo for selected review" onerror="this.hidden = true; this.closest('.source-photo-frame').dataset.sourcePhotoState = 'missing';">
+            <div class="source-photo-missing" role="status">Source photo unavailable in this local run</div>
+          </div>`
+        : `<div class="source-photo-frame" data-source-photo-state="missing">
+            <div class="source-photo-missing" role="status">${escapeHtml(item.photo_id ? "Source photo unavailable in this local run" : "No source photo attached to this review item")}</div>
+          </div>`;
       return `
         <div class="review-source-preview">
-          ${item.image_url ? `<img src="${escapeHtml(item.image_url)}" alt="Source cage-card photo for selected review">` : ""}
+          ${sourcePhotoFrame}
           ${evidenceBadgeList(badgeItems)}
           <div class="review-source-grid">
             ${sourceCells.map(([label, value]) => `<span>${escapeHtml(label)}<strong>${escapeHtml(value)}</strong></span>`).join("")}
@@ -6495,25 +6624,42 @@
       return Array.from(new Set(items.map((item) => String(item || "").trim()).filter(Boolean)));
     }
 
+    function operatorReviewWorkloadCount(reviews) {
+      const counts = reviewAttentionCounts(reviews);
+      return Number(counts.must_review || 0) + Number(counts.quick_check || 0);
+    }
+
     function renderShellStatus({ health, photoWorkbench, photos, reviews, mice, evidenceComparison, preview }) {
       const openReviewCount = reviews.filter((item) => item.status === "open").length;
+      const operatorWorkloadCount = operatorReviewWorkloadCount(reviews);
       const pendingPhotoCount = photoWorkbench.pending_transcription_count || 0;
       const comparisons = evidenceComparison.comparisons || [];
       const comparisonReviewCount = comparisons.filter((item) => item.review_required || item.review_status === "open").length;
+      const commonExportReady = Boolean(preview.ready);
+      const animalSheetReady = Boolean(preview.animal_sheet_ready ?? preview.ready);
+      const allFinalExportsReady = commonExportReady && animalSheetReady;
+      const animalSheetValidationBlockerCount = Number(preview.animal_sheet_validation_blocker_items || 0);
+      const topExportLabel = allFinalExportsReady
+        ? "Export ready"
+        : commonExportReady && animalSheetValidationBlockerCount
+          ? "Animal sheet review"
+          : `${preview.blocked_review_items || 0} export blockers`;
       document.getElementById("navPhotoCount").textContent = String(pendingPhotoCount || photos.length);
-      document.getElementById("navReviewCount").textContent = String(openReviewCount);
+      document.getElementById("navReviewCount").textContent = String(operatorWorkloadCount);
       document.getElementById("navComparisonCount").textContent = String(comparisonReviewCount);
-      document.getElementById("navExportCount").textContent = preview.ready ? "ready" : String(preview.blocked_review_items || 0);
+      document.getElementById("navExportCount").textContent = allFinalExportsReady ? "ready" : String(preview.blocked_review_items || 0);
       document.getElementById("navMouseCount").textContent = String(mice.length);
-      document.getElementById("navDashboardCount").textContent = String(openReviewCount);
+      document.getElementById("navDashboardCount").textContent = String(operatorWorkloadCount);
       document.getElementById("heroPhotoCount").textContent = String(photos.length);
       document.getElementById("heroPendingPhotos").textContent = String(pendingPhotoCount);
-      document.getElementById("heroOpenReviews").textContent = String(openReviewCount);
-      document.getElementById("topOpenReviews").textContent = `${openReviewCount} open reviews`;
-      document.getElementById("topExportStatus").textContent = preview.ready ? "Export ready" : `${preview.blocked_review_items || 0} export blockers`;
-      document.getElementById("topExportStatus").classList.toggle("warn", !preview.ready);
+      document.getElementById("heroOpenReviews").textContent = String(operatorWorkloadCount);
+      document.getElementById("topOpenReviews").textContent = `${operatorWorkloadCount} review task(s)`;
+      document.getElementById("topExportStatus").textContent = topExportLabel;
+      document.getElementById("topExportStatus").classList.toggle("warn", !allFinalExportsReady);
       const aiStatus = health.ai_draft || {};
-      document.getElementById("health").textContent = aiStatus.available ? "local + AI draft ready" : "local-only";
+      document.getElementById("health").textContent = aiStatus.available
+        ? (aiStatus.approval_required ? "AI draft: approval required" : "AI draft ready")
+        : "local-only";
     }
 
     function firstMouse(mice) {
@@ -7375,7 +7521,11 @@
           "Export preview rows",
           preview.preview_row_count || 0,
           "export or view",
-          preview.ready ? "Ready for final export." : "Use as preview only until blockers are cleared."
+          preview.ready && (preview.animal_sheet_ready ?? preview.ready)
+            ? "Ready for final export."
+            : preview.ready && Number(preview.animal_sheet_validation_blocker_items || 0)
+              ? "CSV and separation ready; animal sheet needs litter review."
+              : "Use as preview only until blockers are cleared."
         ],
         [
           "Stored source photos",
@@ -7498,23 +7648,33 @@
 
     function setFinalExportActionState(preview) {
       const ready = Boolean(preview.ready);
+      const animalSheetReady = Boolean(preview.animal_sheet_ready ?? preview.ready);
+      const allFinalReady = ready && animalSheetReady;
+      const buttonReadiness = {
+        exportReadyMouseCsvButton: Boolean(preview.mouse_csv_ready ?? preview.ready),
+        exportSeparationXlsxButton: Boolean(preview.separation_ready ?? preview.ready),
+        exportAnimalSheetXlsxButton: animalSheetReady,
+      };
       const blockerCount = Number(preview.blocked_review_items || 0);
       const genotypeBlockerCount = Number(preview.genotype_blocker_items || 0);
+      const animalSheetValidationBlockerCount = Number(preview.animal_sheet_validation_blocker_items || 0);
       const warningCount = (preview.readiness_warnings || []).length;
       const previewRowCount = Number(preview.preview_row_count || 0);
       const hasExplicitBlockers = blockerCount || genotypeBlockerCount || warningCount;
-      const reasonText = ready
+      const reasonText = allFinalReady
         ? "Final downloads are enabled because accepted state has no blocking Focus Review items."
+        : ready && animalSheetValidationBlockerCount
+          ? `CSV and separation exports are enabled; animal sheet export is disabled until ${animalSheetValidationBlockerCount} litter/date/count validation blocker(s) are reviewed.`
         : hasExplicitBlockers
           ? `Final downloads disabled: ${blockerCount} Focus Review blocker(s), ${genotypeBlockerCount} genotype blocker(s), and ${warningCount} readiness warning(s) must be reviewed first.`
           : `Final downloads disabled: ${previewRowCount} accepted source-backed export row(s) are ready. Upload, review, and accept cage-card evidence before generating final files.`;
       const reason = document.getElementById("exportDisabledReason");
       reason.textContent = reasonText;
-      reason.classList.toggle("ready", ready);
+      reason.classList.toggle("ready", allFinalReady);
       reason.setAttribute("role", "status");
-      ["exportReadyMouseCsvButton", "exportSeparationXlsxButton", "exportAnimalSheetXlsxButton"].forEach((id) => {
+      Object.entries(buttonReadiness).forEach(([id, buttonReady]) => {
         const button = document.getElementById(id);
-        button.disabled = !ready;
+        button.disabled = !buttonReady;
         button.title = reasonText;
         button.setAttribute("aria-describedby", "exportDisabledReason");
       });
@@ -7525,17 +7685,29 @@
       const readinessWarnings = preview.readiness_warnings || [];
       const readinessItems = [...blockers, ...readinessWarnings];
       const rowCount = preview.preview_row_count || 0;
-      const statusLabel = preview.ready ? "Ready for final export" : "Blocked by review";
+      const commonReady = Boolean(preview.ready);
+      const animalSheetReady = Boolean(preview.animal_sheet_ready ?? preview.ready);
+      const allFinalReady = commonReady && animalSheetReady;
+      const focusReviewBlockerCount = Number(preview.focus_review_blocker_items || 0);
+      const animalSheetValidationBlockerCount = Number(preview.animal_sheet_validation_blocker_items || 0);
+      const finalExportBlockerCount = Number(preview.final_export_blocker_items ?? preview.blocked_review_items ?? 0);
+      const statusLabel = allFinalReady
+        ? "Ready for final export"
+        : commonReady && animalSheetValidationBlockerCount
+          ? "Animal sheet review required"
+          : "Blocked by review";
       const readinessCard = document.getElementById("exportReadinessCard");
-      readinessCard.classList.toggle("ready", Boolean(preview.ready));
-      readinessCard.classList.toggle("blocked", !preview.ready);
+      readinessCard.classList.toggle("ready", allFinalReady);
+      readinessCard.classList.toggle("blocked", !allFinalReady);
       document.getElementById("exportReadinessState").textContent = statusLabel;
       const badge = document.getElementById("exportReadinessBadge");
-      badge.textContent = preview.ready ? "ready" : `${preview.blocked_review_items || 0} blocker(s)`;
-      badge.className = preview.ready ? "status" : "status warn";
+      badge.textContent = allFinalReady ? "ready" : `${finalExportBlockerCount} blocker(s)`;
+      badge.className = allFinalReady ? "status" : "status warn";
       document.getElementById("exportPreview").textContent =
-        preview.ready
+        allFinalReady
           ? `Final exports can be generated from ${rowCount} source-backed mouse row(s).`
+          : commonReady && animalSheetValidationBlockerCount
+            ? `CSV and separation exports can be generated; animal sheet needs ${animalSheetValidationBlockerCount} litter/date/count validation blocker(s) reviewed first.`
           : `Resolve Focus Review blockers before final exports; quick checks and trace-only items remain visible without blocking the file.`;
       document.getElementById("exportReadinessMetrics").innerHTML = [
         ["Photos", preview.photos || 0],
@@ -7543,15 +7715,18 @@
         ["Preview rows", rowCount],
         ["Separation rows", preview.separation_row_count || 0],
         ["Animal rows", preview.animal_sheet_row_count || 0],
-        ["Focus blockers", preview.blocked_review_items || 0],
+        ["Focus blockers", preview.focus_review_blocker_items || 0],
+        ["Final export blockers", preview.blocked_review_items || 0],
         ["Open reviews", preview.open_review_items || 0],
         ["Genotype blockers", preview.genotype_blocker_items || 0]
       ].map(([label, value]) => `
         <div class="readiness-metric"><strong>${escapeHtml(value)}</strong><span>${escapeHtml(label)}</span></div>
       `).join("");
-      document.getElementById("exportActionSummary").textContent = preview.ready
+      document.getElementById("exportActionSummary").textContent = allFinalReady
         ? "Final CSV and workbook downloads are ready. Generated files will be recorded in the export log."
-        : `${preview.blocked_review_items || 0} Focus Review blocker(s) can still change exported values; quick checks stay reviewable without blocking export.`;
+        : commonReady && animalSheetValidationBlockerCount
+          ? "Final CSV and separation workbook downloads are ready; animal sheet remains blocked by litter/date/count validation."
+        : `${focusReviewBlockerCount} Focus Review blocker(s) can still change exported values; quick checks stay reviewable without blocking export.`;
       setFinalExportActionState(preview);
       document.getElementById("exportFilenames").textContent =
         `Last export: ${preview.latest_generated_export_at || "none"}; ` +
@@ -7597,7 +7772,7 @@
           item.source_note_item_ids || "--",
           [item.source_photo_ids && `photo ${item.source_photo_ids}`, item.card_snapshot_ids && `snapshot ${item.card_snapshot_ids}`, item.raw_note_lines && `raw ${item.raw_note_lines}`].filter(Boolean).join(" / ") || "--",
           item.uncertainty || "--"
-        ], item, preview.ready, "separation")
+        ], item, preview.separation_ready ?? preview.ready, "separation")
       ).join("") || emptyTableRow("No separation preview rows yet", "Accepted source-backed separated cage rows will appear here before workbook export.", 12);
       document.getElementById("animalSheetRows").innerHTML = (preview.animal_sheet_rows || []).map((item) =>
         exportPreviewRow([
@@ -7613,7 +7788,7 @@
           item.source || "--",
           [item.source_photo_ids && `photo ${item.source_photo_ids}`, item.card_snapshot_ids && `snapshot ${item.card_snapshot_ids}`, item.raw_note_lines && `raw ${item.raw_note_lines}`].filter(Boolean).join(" / ") || "--",
           item.uncertainty || "--"
-        ], item, preview.ready, "animal")
+        ], item, preview.animal_sheet_ready ?? preview.ready, "animal")
       ).join("") || emptyTableRow("No animal sheet preview rows yet", "Accepted source-backed animal rows will appear here before workbook export.", 13);
       document.getElementById("exportBlockerRows").innerHTML = readinessItems.map((item) => `
         <tr>
@@ -7781,7 +7956,7 @@
       const aiStatus = health.ai_draft || {};
       currentAiStatus = aiStatus;
       document.getElementById("aiDraftMessage").textContent = aiStatus.available
-        ? `AI extraction ready with ${aiStatus.model} (${aiStatus.key_source || "configured"} key); uploaded photos will be extracted automatically as review evidence.`
+        ? `AI extraction available with ${aiStatus.model} (${aiStatus.key_source || "configured"} key); external inference runs only after button approval and saved results remain review evidence.`
         : "AI extraction unavailable: enter a session API key here or set OPENAI_API_KEY before starting the server. Manual transcription remains available.";
       renderReviewVocabulary(reviewVocabulary);
       renderVisualizations({ assignedStrains, strains, reviews, mice, mouseEvents, cages, matings, litters, genotypingDashboard, preview });
@@ -7984,7 +8159,7 @@
                 data-review-id="${escapeHtml(item.review_id)}"
                 data-photo-id="${escapeHtml(item.photo_id)}" aria-label="Open source photo for review item ${escapeHtml(item.review_id)}">Photo</button>
             ` : ""}
-            ${item.status === "open" && item.attention_level === "quick_check" && item.issue !== "Unlabeled numeric note needs review" ? `
+            ${reviewAllowsQuickResolve(item) ? `
               <button class="quick-resolve-review" type="button"
                 data-review-id="${escapeHtml(item.review_id)}"
                 data-current-value="${escapeHtml(item.current_value || "")}"
@@ -8488,7 +8663,7 @@
       });
       input.value = "";
       message.textContent = result.ai_draft?.available
-        ? `AI draft ready with ${result.ai_draft.model} (session key). The key is not written to the database.`
+        ? `AI draft available with ${result.ai_draft.model} (session key); each photo still requires button approval. The key is not written to the database.`
         : "AI draft key was not activated.";
       await refresh();
     });

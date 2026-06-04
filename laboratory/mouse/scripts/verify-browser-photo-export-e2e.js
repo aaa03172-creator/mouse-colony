@@ -16,6 +16,24 @@ function assert(condition, message) {
   }
 }
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function removeTempRoot(tempRoot) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      lastError = error;
+      await delay(250);
+    }
+  }
+  throw lastError;
+}
+
 function httpGet(url) {
   return new Promise((resolve, reject) => {
     const request = http.get(url, (response) => {
@@ -388,7 +406,15 @@ async function mapComparisonReviewToCandidate(page) {
     (await panel.locator(".review-resolution-message").getAttribute("data-warning-kind")) === "canonical-mapping-warning",
     "Mapping a candidate from weak note-line evidence should warn before creating a draft."
   );
+  const resolveResponsePromise = page.waitForResponse(
+    (response) => response.url().includes("/api/review-items/") && response.url().includes("/resolve"),
+    { timeout: 10000 }
+  );
   await panel.locator(".resolve-review").click();
+  const resolveResponse = await resolveResponsePromise;
+  if (!resolveResponse.ok()) {
+    throw new Error(`Mapping comparison review failed: ${resolveResponse.status()} ${await resolveResponse.text()}`);
+  }
   const mapped = await waitForValue(page, () => fetch("/api/canonical-candidates")
     .then((response) => response.json())
     .then((candidates) => candidates.find((candidate) => candidate.status === "draft") || null));
@@ -583,7 +609,7 @@ async function run() {
     await waitForText(page, "#assignedStrainMessage", "Added ApoM Tg/Tg");
 
     await setView(page, "photo");
-    await waitForText(page, "#aiDraftMessage", "AI extraction ready");
+    await waitForText(page, "#aiDraftMessage", "button approval");
     const photoPath = path.join(ROOT, "static", "assets", "cage-card-evidence-art.png");
     await page.setInputFiles("#photoFile", photoPath);
     await page.locator("#uploadButton").click();
@@ -655,7 +681,7 @@ async function run() {
   } finally {
     if (browser) await browser.close();
     await stopServer(server);
-    fs.rmSync(tempRoot, { recursive: true, force: true });
+    await removeTempRoot(tempRoot);
     if (server.exitCode && server.exitCode !== 0) {
       process.stderr.write(serverOutput.join(""));
     }
