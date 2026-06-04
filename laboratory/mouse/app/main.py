@@ -692,6 +692,27 @@ def mouse_event_evidence_refs(row: Any) -> dict[str, str]:
     }
 
 
+def action_log_evidence_refs(after: dict[str, Any]) -> dict[str, str]:
+    nested_refs = after.get("evidence_refs")
+    if not isinstance(nested_refs, dict):
+        nested_refs = {}
+    return {
+        "source_record_id": str(after.get("source_record_id") or nested_refs.get("source_record_id") or ""),
+        "source_photo_id": str(after.get("source_photo_id") or nested_refs.get("source_photo_id") or ""),
+        "source_note_item_id": str(after.get("source_note_item_id") or nested_refs.get("source_note_item_id") or ""),
+        "photo_evidence_id": str(after.get("photo_evidence_id") or nested_refs.get("photo_evidence_id") or ""),
+    }
+
+
+def action_log_evidence_summary(evidence_refs: dict[str, str]) -> dict[str, Any]:
+    count = sum(1 for value in evidence_refs.values() if value)
+    return {
+        "has_supporting_evidence": count > 0,
+        "supporting_evidence_count": count,
+        "label": "Open supporting evidence" if count > 0 else "No supporting evidence linked",
+    }
+
+
 def mouse_pedigree_empty_state() -> dict[str, Any]:
     return {
         "message": "Choose a mouse to view accepted pedigree relationships.",
@@ -3913,6 +3934,9 @@ def ui_action_log(target_id: str = "", action_type: str = "", limit: int = 50) -
     for row in rows:
         before_value = row["before_value"] or ""
         after_value = row["after_value"] or ""
+        before = json_object(before_value)
+        after = json_object(after_value)
+        evidence_refs = action_log_evidence_refs(after)
         actions.append(
             {
                 "action_id": row["action_id"],
@@ -3920,8 +3944,10 @@ def ui_action_log(target_id: str = "", action_type: str = "", limit: int = 50) -
                 "target_id": row["target_id"],
                 "before_value": before_value,
                 "after_value": after_value,
-                "before": json_object(before_value),
-                "after": json_object(after_value),
+                "before": before,
+                "after": after,
+                "evidence_refs": evidence_refs,
+                "evidence_summary": action_log_evidence_summary(evidence_refs),
                 "performed_by": row["performed_by"],
                 "performed_role": row["performed_role"],
                 "created_at": row["created_at"],
@@ -11720,7 +11746,15 @@ def move_mouse_to_cage(mouse_id: str, payload: MouseCageMove) -> dict[str, Any]:
                 "mouse_cage_moved",
                 mouse_id,
                 json.dumps(dict(previous) if previous else {}, ensure_ascii=False),
-                json.dumps({"cage_id": payload.cage_id, "cage_label": cage["cage_label"]}, ensure_ascii=False),
+                json.dumps(
+                    {
+                        "cage_id": payload.cage_id,
+                        "cage_label": cage["cage_label"],
+                        "source_record_id": source_record_id,
+                        "evidence_refs": evidence_refs,
+                    },
+                    ensure_ascii=False,
+                ),
                 moved_at,
             ),
         )
@@ -12404,6 +12438,7 @@ def wean_litter(litter_id: str, payload: LitterWeanCreate) -> dict[str, Any]:
             "weaning_date": weaning_date,
             "source_record_id": source_record_id,
             "weaned_mouse_ids": [row["mouse_id"] for row in selected_offspring],
+            "evidence_refs": evidence_refs,
         }
         conn.execute(
             """

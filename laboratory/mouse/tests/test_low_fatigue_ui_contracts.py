@@ -1344,6 +1344,17 @@ def test_action_log_viewer_exposes_recent_actions_without_mutation(tmp_path: Pat
                 "after_value": '{"status": "resolved"}',
                 "before": {"status": "open"},
                 "after": {"status": "resolved"},
+                "evidence_refs": {
+                    "source_record_id": "",
+                    "source_photo_id": "",
+                    "source_note_item_id": "",
+                    "photo_evidence_id": "",
+                },
+                "evidence_summary": {
+                    "has_supporting_evidence": False,
+                    "supporting_evidence_count": 0,
+                    "label": "No supporting evidence linked",
+                },
                 "performed_by": "local_user",
                 "performed_role": "Colony Reviewer",
                 "created_at": "2026-05-09T11:20:00Z",
@@ -1352,6 +1363,62 @@ def test_action_log_viewer_exposes_recent_actions_without_mutation(tmp_path: Pat
         with db.connection() as conn:
             action_count = conn.execute("SELECT COUNT(*) AS count FROM action_log").fetchone()["count"]
         assert action_count == 2
+    finally:
+        db.DB_PATH = old_db_path
+
+
+def test_action_log_viewer_summarizes_supporting_evidence_without_forcing_json_inspection(tmp_path: Path) -> None:
+    old_db_path = db.DB_PATH
+    try:
+        db.DB_PATH = tmp_path / "mouse_lims.sqlite"
+        db.init_db()
+        with db.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO action_log
+                    (action_id, action_type, target_id, before_value, after_value,
+                     performed_by, performed_role, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "action_mouse_moved",
+                    "mouse_cage_moved",
+                    "MT401",
+                    json.dumps({"cage_id": "cage_old"}, ensure_ascii=False),
+                    json.dumps(
+                        {
+                            "cage_id": "cage_new",
+                            "source_record_id": "source_move_401",
+                            "evidence_refs": {
+                                "source_photo_id": "photo_move_401",
+                                "source_note_item_id": "note_move_401",
+                                "photo_evidence_id": "pe_move_401",
+                            },
+                        },
+                        ensure_ascii=False,
+                    ),
+                    "local_user",
+                    "Colony Reviewer",
+                    "2026-05-09T11:20:00Z",
+                ),
+            )
+        client = TestClient(app)
+
+        response = client.get("/api/ui/action-log?target_id=MT401")
+
+        assert response.status_code == 200
+        action = response.json()["actions"][0]
+        assert action["evidence_refs"] == {
+            "source_record_id": "source_move_401",
+            "source_photo_id": "photo_move_401",
+            "source_note_item_id": "note_move_401",
+            "photo_evidence_id": "pe_move_401",
+        }
+        assert action["evidence_summary"] == {
+            "has_supporting_evidence": True,
+            "supporting_evidence_count": 4,
+            "label": "Open supporting evidence",
+        }
     finally:
         db.DB_PATH = old_db_path
 
