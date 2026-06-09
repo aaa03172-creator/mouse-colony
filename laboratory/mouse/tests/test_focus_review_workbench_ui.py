@@ -67,3 +67,10 @@ def test_resolution_payload_includes_checked_workbench_field() -> None:
     assert "hasScoringOutcome || checkedWorkbenchField" in payload_block
     assert "checked_workbench_field" in payload_block
     assert "field_review_workbench" in payload_block
+
+
+def test_data_guardian_ui_warns_canonical_is_unchanged() -> None:
+    assert "데이터 지킴이" in HTML
+    assert "무스" in HTML
+    assert "canonical 값은 아직 변경되지 않았습니다" in HTML
+    assert "/api/data-guardian/review-queue" in HTML

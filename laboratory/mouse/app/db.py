@@ -501,6 +501,68 @@ def init_db() -> None:
                 FOREIGN KEY (parse_id) REFERENCES parse_result(parse_id)
             );
 
+            CREATE TABLE IF NOT EXISTS auto_recheck_runs (
+                run_id TEXT PRIMARY KEY,
+                source_type TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                input_manifest_json TEXT NOT NULL DEFAULT '{}',
+                allow_external_services INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'created',
+                summary_json TEXT NOT NULL DEFAULT '{}',
+                canonical INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS evidence_bundles (
+                evidence_bundle_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                target_type TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                field_key TEXT NOT NULL,
+                evidence_json TEXT NOT NULL DEFAULT '{}',
+                source_layer TEXT NOT NULL,
+                canonical INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (run_id) REFERENCES auto_recheck_runs(run_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS data_guardian_review_items (
+                review_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                target_type TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                field_key TEXT NOT NULL,
+                candidate_value_raw TEXT NOT NULL DEFAULT '',
+                candidate_value_normalized TEXT NOT NULL DEFAULT '',
+                current_canonical_value TEXT NOT NULL DEFAULT '',
+                previous_confirmed_value TEXT NOT NULL DEFAULT '',
+                risk_status TEXT NOT NULL,
+                risk_reasons_json TEXT NOT NULL DEFAULT '[]',
+                recommended_action TEXT NOT NULL DEFAULT '',
+                evidence_bundle_id TEXT NOT NULL DEFAULT '',
+                resolution_status TEXT NOT NULL DEFAULT 'open',
+                canonical INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (run_id) REFERENCES auto_recheck_runs(run_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS proposed_changesets (
+                changeset_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                target_type TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                field_key TEXT NOT NULL,
+                before_value TEXT NOT NULL DEFAULT '',
+                proposed_after_value TEXT NOT NULL DEFAULT '',
+                evidence_bundle_id TEXT NOT NULL DEFAULT '',
+                confidence REAL NOT NULL DEFAULT 0,
+                approval_status TEXT NOT NULL DEFAULT 'pending',
+                canonical INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                approved_at TEXT,
+                FOREIGN KEY (run_id) REFERENCES auto_recheck_runs(run_id)
+            );
+
             CREATE TABLE IF NOT EXISTS action_log (
                 action_id TEXT PRIMARY KEY,
                 action_type TEXT NOT NULL,

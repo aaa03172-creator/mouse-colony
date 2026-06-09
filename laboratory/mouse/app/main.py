@@ -33,6 +33,14 @@ from .breeding_rules import DEFAULT_BREEDING_RULE_SET
 from .labeling_rules import interpret_crossed_out_status, match_samples_to_mice
 from .hybrid_note_line_evaluator import build_rule_snapshot, evaluate_note_line_candidate
 from .matching import MatchCandidate, match_candidate
+from .review_package_import import ReviewPackageError, parse_review_package
+from .review_sentinel import (
+    build_evidence_bundle_from_review_package_item,
+    classify_recheck_risk,
+    create_auto_recheck_run,
+    create_data_guardian_review_item,
+    create_evidence_bundle,
+)
 from .storage import new_id, save_legacy_workbook, save_upload, utc_now
 from scripts.parse_legacy_workbooks import parse_workbook
 
@@ -161,6 +169,14 @@ class ReviewResolutionCreate(BaseModel):
     audit_taxonomy_note: str = ""
     note_line_scoring_scope: str = ""
     field_review_outcome: dict[str, Any] = Field(default_factory=dict)
+
+
+class DataGuardianAutoRecheckCreate(BaseModel):
+    source_type: str = Field(min_length=1)
+    source_id: str = Field(min_length=1)
+    approved_local_recheck: bool = False
+    allow_external_services: bool = False
+    items: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class PhotoManualTranscriptionCreate(BaseModel):
@@ -1688,6 +1704,258 @@ def ui_operations_home() -> dict[str, Any]:
         },
         "task_groups": grouped,
         "empty_state": operations_home_empty_state(),
+    }
+
+
+@app.post("/api/review-packages/import")
+def import_review_package(payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        parsed = parse_review_package(payload)
+    except ReviewPackageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    now = utc_now()
+    raw_payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    parse_payload = {
+        "payload_kind": "review_package_import",
+        "source_layer": "parsed or intermediate result",
+        "parsed": parsed,
+    }
+    parse_payload_json = json.dumps(parse_payload, ensure_ascii=False, sort_keys=True)
+    source_record_id = new_id("source")
+    parse_id = new_id("parse")
+    created_review_items = 0
+    created_candidates = 0
+
+    with connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO source_record (
+                source_record_id,
+                source_type,
+                source_label,
+                raw_payload,
+                imported_at,
+                checksum,
+                note
+            )
+            VALUES (?, 'mouse_card_review_package', ?, ?, ?, ?, ?)
+            """,
+            (
+                source_record_id,
+                str(payload.get("owner") or ""),
+                raw_payload_json,
+                now,
+                hashlib.sha256(raw_payload_json.encode("utf-8")).hexdigest(),
+                "Imported as non-canonical review package.",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO parse_result (
+                parse_id,
+                photo_id,
+                source_name,
+                raw_payload,
+                parsed_at,
+                status,
+                confidence,
+                needs_review,
+                source_layer
+            )
+            VALUES (?, NULL, ?, ?, ?, 'review_required', 0, 1, 'parsed or intermediate result')
+            """,
+            (parse_id, "review_package_import", parse_payload_json, now),
+        )
+
+        for card in parsed["cards"]:
+            review_id = new_id("review")
+            evidence = {
+                "source_record_id": source_record_id,
+                "card_id": card["card_id"],
+                "source_photo": card["source"]["photo"],
+                "source_note": card["source"]["note"],
+            }
+            conn.execute(
+                """
+                INSERT INTO review_queue (
+                    review_id,
+                    parse_id,
+                    severity,
+                    issue,
+                    current_value,
+                    suggested_value,
+                    review_reason,
+                    source_layer,
+                    evidence_reference_json,
+                    review_trigger_json,
+                    status,
+                    created_at
+                )
+                VALUES (?, ?, 'medium', ?, '', ?, ?, 'review item', ?, ?, 'open', ?)
+                """,
+                (
+                    review_id,
+                    parse_id,
+                    f"Review package card requires confirmation: {card['card_id']}",
+                    card["normalized"]["strain_key"],
+                    "Review package imports are non-canonical until human resolution.",
+                    json.dumps(evidence, ensure_ascii=False, sort_keys=True),
+                    json.dumps({"trigger": "review_package_import"}, ensure_ascii=False, sort_keys=True),
+                    now,
+                ),
+            )
+            created_review_items += 1
+
+            candidate_id = new_id("candidate")
+            conn.execute(
+                """
+                INSERT INTO canonical_candidate (
+                    candidate_id,
+                    review_id,
+                    parse_id,
+                    legacy_row_id,
+                    proposed_mouse_display_id,
+                    proposed_strain,
+                    proposed_dob,
+                    proposed_count,
+                    candidate_payload,
+                    status,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)
+                """,
+                (
+                    candidate_id,
+                    review_id,
+                    parse_id,
+                    card["card_id"],
+                    card["raw"]["id"],
+                    card["normalized"]["strain_key"],
+                    card["raw"]["dob"],
+                    card["raw"]["sex_total"],
+                    json.dumps(card, ensure_ascii=False, sort_keys=True),
+                    now,
+                    now,
+                ),
+            )
+            created_candidates += 1
+
+    return {
+        "source_layer": "parsed or intermediate result",
+        "canonical": False,
+        "source_record_id": source_record_id,
+        "parse_id": parse_id,
+        "created_review_items": created_review_items,
+        "created_candidates": created_candidates,
+        "export_ready": False,
+    }
+
+
+@app.post("/api/data-guardian/auto-recheck")
+def create_data_guardian_auto_recheck(payload: DataGuardianAutoRecheckCreate) -> dict[str, Any]:
+    if not payload.approved_local_recheck:
+        raise HTTPException(status_code=403, detail="Local auto-recheck requires explicit approval.")
+    if payload.allow_external_services:
+        raise HTTPException(status_code=400, detail="External OCR/LLM services are not enabled for auto-recheck.")
+
+    run_id = create_auto_recheck_run(
+        source_type=payload.source_type,
+        source_id=payload.source_id,
+        input_manifest={"item_count": len(payload.items)},
+        allow_external_services=False,
+    )
+    summary = {
+        "checked_count": len(payload.items),
+        "auto_passed_count": 0,
+        "quick_review_count": 0,
+        "photo_check_required_count": 0,
+        "conflict_review_count": 0,
+        "blocked_count": 0,
+        "recheck_failed_count": 0,
+    }
+    review_item_ids: list[str] = []
+
+    for index, item in enumerate(payload.items, start=1):
+        bundle = build_evidence_bundle_from_review_package_item(item, run_id=run_id)
+        risk = classify_recheck_risk(
+            {
+                **bundle["evidence"],
+                "field_key": bundle["field_key"],
+                "current_canonical_value": item.get("current_canonical_value"),
+                "requires_external_service": item.get("requires_external_service", False),
+            }
+        )
+        risk_status = risk["risk_status"]
+        summary_key = f"{risk_status}_count"
+        if summary_key in summary:
+            summary[summary_key] += 1
+        if risk_status == "auto_passed":
+            continue
+        evidence_bundle_id = f"{run_id}:evidence:{index}"
+        create_evidence_bundle(
+            evidence_bundle_id=evidence_bundle_id,
+            run_id=run_id,
+            target_type=bundle["target_type"],
+            target_id=bundle["target_id"] or f"item-{index}",
+            field_key=bundle["field_key"],
+            evidence=bundle["evidence"],
+            source_layer=bundle["source_layer"],
+        )
+        review_item_ids.append(
+            create_data_guardian_review_item(
+                run_id=run_id,
+                target_type=bundle["target_type"],
+                target_id=bundle["target_id"] or f"item-{index}",
+                field_key=bundle["field_key"],
+                candidate_value_raw=str(item.get("candidate_value") or ""),
+                candidate_value_normalized=str(item.get("candidate_value") or ""),
+                current_canonical_value=str(item.get("current_canonical_value") or ""),
+                previous_confirmed_value=str(item.get("previous_confirmed_value") or ""),
+                risk_status=risk_status,
+                risk_reasons=risk["risk_reasons"],
+                recommended_action="review_evidence",
+                evidence_bundle_id=evidence_bundle_id,
+            )
+        )
+
+    return {
+        "run_id": run_id,
+        "canonical": False,
+        "source_layer": "review item",
+        "summary": summary,
+        "review_item_ids": review_item_ids,
+    }
+
+
+@app.get("/api/data-guardian/review-queue")
+def list_data_guardian_review_queue(include_auto_passed: bool = False) -> dict[str, Any]:
+    where_clause = "" if include_auto_passed else "WHERE risk_status != 'auto_passed'"
+    with connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT review_id, run_id, target_type, target_id, field_key,
+                   candidate_value_raw, candidate_value_normalized,
+                   current_canonical_value, previous_confirmed_value,
+                   risk_status, risk_reasons_json, recommended_action,
+                   evidence_bundle_id, resolution_status, canonical
+            FROM data_guardian_review_items
+            {where_clause}
+            ORDER BY created_at, review_id
+            """
+        ).fetchall()
+    return {
+        "source_layer": "review item",
+        "canonical": False,
+        "items": [
+            {
+                **dict(row),
+                "canonical": bool(row["canonical"]),
+                "risk_reasons": json.loads(row["risk_reasons_json"] or "[]"),
+            }
+            for row in rows
+        ],
     }
 
 
