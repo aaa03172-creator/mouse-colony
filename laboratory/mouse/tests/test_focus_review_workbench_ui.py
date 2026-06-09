@@ -74,3 +74,12 @@ def test_data_guardian_ui_warns_canonical_is_unchanged() -> None:
     assert "무스" in HTML
     assert "canonical 값은 아직 변경되지 않았습니다" in HTML
     assert "/api/data-guardian/review-queue" in HTML
+
+
+def test_data_guardian_ui_fetches_review_queue_summary() -> None:
+    assert "function renderDataGuardianSummary" in HTML
+    assert "async function loadDataGuardianSummary" in HTML
+    assert "dataGuardianSummaryCounts" in HTML
+    assert "dataGuardianReviewItems" in HTML
+    assert "panel.dataset.reviewQueueEndpoint" in HTML
+    assert "loadDataGuardianSummary();" in HTML

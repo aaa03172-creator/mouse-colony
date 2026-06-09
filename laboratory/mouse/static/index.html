@@ -3543,6 +3543,8 @@
               <strong>무스가 자동 재확인 항목을 준비합니다.</strong>
               <span>canonical 값은 아직 변경되지 않았습니다. 원본 사진, note-line evidence, Excel row 근거가 있는 항목만 검토 큐로 남깁니다.</span>
             </div>
+            <div class="review-queue-summary" id="dataGuardianSummaryCounts"></div>
+            <div class="review-card-list" id="dataGuardianReviewItems" aria-label="Data Guardian review items"></div>
           </div>
           <div class="review-queue-summary" id="reviewQueueSummary"></div>
           <div class="review-follow-through" id="reviewFollowThrough" role="status" aria-live="polite"></div>
@@ -4921,6 +4923,55 @@
       panel.querySelectorAll(".open-output-exception-overflow").forEach((button) => {
         button.addEventListener("click", async () => openOutputExceptionOverflow(button.dataset.targetView));
       });
+    }
+
+    function renderDataGuardianSummary(payload) {
+      const countsTarget = document.getElementById("dataGuardianSummaryCounts");
+      const itemsTarget = document.getElementById("dataGuardianReviewItems");
+      if (!countsTarget || !itemsTarget) return;
+      const items = Array.isArray(payload?.items) ? payload.items : [];
+      const counts = items.reduce((acc, item) => {
+        const status = item.risk_status || "unknown";
+        acc[status] = (acc[status] || 0) + 1;
+        return acc;
+      }, {});
+      const countLabels = [
+        `Review ${items.length}`,
+        `Photo ${counts.photo_check_required || 0}`,
+        `Conflict ${counts.conflict_review || 0}`,
+        `Quick ${counts.quick_review || 0}`,
+        `Blocked ${counts.blocked || 0}`
+      ];
+      countsTarget.innerHTML = countLabels
+        .map((label) => `<span class="chip">${escapeHtml(label)}</span>`)
+        .join("");
+      itemsTarget.innerHTML = items.slice(0, 5).map((item) => {
+        const reasons = Array.isArray(item.risk_reasons) ? item.risk_reasons.join(", ") : item.risk_reasons_json || "";
+        return `
+          <article class="review-card" data-data-guardian-review-id="${escapeHtml(item.review_id || "")}">
+            <div class="review-card-content">
+              <span class="review-card-kind warn">Mus</span>
+              <h3>${escapeHtml(item.field_key || "field review")}</h3>
+              <p>${escapeHtml(item.risk_status || "review_required")}</p>
+              <div class="review-evidence">${escapeHtml(reasons || "Evidence-backed review item")}</div>
+            </div>
+          </article>
+        `;
+      }).join("") || '<p class="muted">Mus has no open review items.</p>';
+    }
+
+    async function loadDataGuardianSummary() {
+      const panel = document.getElementById("dataGuardianPanel");
+      if (!panel) return;
+      try {
+        const payload = await api(panel.dataset.reviewQueueEndpoint || "/api/data-guardian/review-queue");
+        renderDataGuardianSummary(payload);
+      } catch (error) {
+        const countsTarget = document.getElementById("dataGuardianSummaryCounts");
+        if (countsTarget) {
+          countsTarget.innerHTML = `<span class="chip warn">${escapeHtml(apiErrorMessage(error))}</span>`;
+        }
+      }
     }
 
     async function openOutputExceptionReview(reviewId, targetView = "review") {
@@ -9374,6 +9425,7 @@
     configureSectionViews();
     setActiveView("photo");
 
+    loadDataGuardianSummary();
     refresh().catch((error) => {
       document.getElementById("health").textContent = "error";
       document.getElementById("health").classList.add("warn");
