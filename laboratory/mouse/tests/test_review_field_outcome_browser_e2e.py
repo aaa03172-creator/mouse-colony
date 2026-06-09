@@ -26,6 +26,15 @@ def test_review_field_outcome_browser_e2e_asserts_submit_payload_field_scores() 
     assert "Browser payload should include corrected mouse-id outcome" in script
 
 
+def test_review_field_outcome_browser_e2e_asserts_side_by_side_workbench() -> None:
+    script = (ROOT / "scripts" / "verify-review-field-outcome-e2e.js").read_text(encoding="utf-8")
+
+    assert ".field-review-workbench" in script
+    assert ".use-field-review-value" in script
+    assert "checked_workbench_field" in script
+    assert "Browser payload should include checked workbench field" in script
+
+
 def test_review_field_outcome_browser_e2e_reaches_sanitized_reporter_input() -> None:
     result = subprocess.run(
         ["node", "scripts/verify-review-field-outcome-e2e.js"],

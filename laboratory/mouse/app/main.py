@@ -552,6 +552,139 @@ def focus_review_action_hint(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def focus_review_field_key(item: dict[str, Any]) -> str:
+    issue = str(item.get("issue") or "").strip().lower()
+    targets = [str(target).strip().lower() for target in item.get("review_check_targets") or []]
+    if "unlabeled numeric note" in issue or any("note" in target for target in targets):
+        return "note_line"
+    if "ear label" in issue or any("ear" in target for target in targets):
+        return "ear_label"
+    if any("dob" in target for target in targets):
+        return "dob"
+    if any("sex" in target or "count" in target for target in targets):
+        return "sex_count"
+    if any("strain" in target for target in targets):
+        return "strain"
+    return "reviewed_value"
+
+
+def focus_review_field_label(field_key: str) -> str:
+    return {
+        "note_line": "Note line",
+        "ear_label": "Ear label",
+        "dob": "DOB",
+        "sex_count": "Sex / count",
+        "strain": "Strain",
+        "reviewed_value": "Reviewed value",
+    }.get(field_key, "Reviewed value")
+
+
+def focus_review_input_type(field_key: str) -> str:
+    if field_key == "ear_label":
+        return "select"
+    return "text"
+
+
+def focus_review_workbench_for_item(item: dict[str, Any]) -> dict[str, Any]:
+    photo_id = str(item.get("photo_id") or "")
+    field_key = focus_review_field_key(item)
+    current_value = str(item.get("review_note_raw_line") or item.get("current_value") or "")
+    suggested_value = str(item.get("suggested_value") or "")
+    evaluator = (
+        item.get("hybrid_note_line_evaluator")
+        if isinstance(item.get("hybrid_note_line_evaluator"), dict)
+        else {}
+    )
+    previous_position = (
+        evaluator.get("previous_position_candidate")
+        if isinstance(evaluator.get("previous_position_candidate"), dict)
+        else {}
+    )
+    previous_value = str(
+        previous_position.get("suggested_preserved_text")
+        or previous_position.get("previous_raw_line_text")
+        or ""
+    )
+    rule_candidate = str(previous_position.get("suggested_status_from_current_strike") or "")
+    if previous_value and not suggested_value:
+        suggested_value = previous_value
+    return {
+        "source_layer": "export or view",
+        "canonical": False,
+        "layout": "photo_left_fields_right",
+        "photo": {
+            "photo_id": photo_id,
+            "image_url": f"/api/photos/{quote(photo_id)}/image" if photo_id else "",
+            "roi_preview_url": f"/api/photos/{quote(photo_id)}/roi-preview" if photo_id else "",
+            "primary_roi_image_url": "",
+            "open_source_photo_label": "Open source photo",
+        },
+        "fields": [
+            {
+                "field_key": field_key,
+                "label": focus_review_field_label(field_key),
+                "current_value": current_value,
+                "suggested_value": suggested_value,
+                "previous_confirmed_value": previous_value,
+                "rule_candidate": rule_candidate,
+                "confidence_label": str(item.get("attention_level") or "review"),
+                "requires_user_value": True,
+                "input_type": focus_review_input_type(field_key),
+                "trace": {
+                    "parse_id": str(item.get("parse_id") or ""),
+                    "photo_id": photo_id,
+                    "note_item_id": str(item.get("note_item_id") or ""),
+                    "line_number": item.get("review_note_line_number") or "",
+                    "roi_ref": (
+                        previous_position.get("previous_trace", {}).get("roi_ref", "")
+                        if previous_position
+                        else ""
+                    ),
+                },
+            }
+        ],
+        "actions": {
+            "confirm_label": "Use checked value",
+            "hold_label": "Keep unresolved",
+            "exclude_label": "Exclude from export candidate",
+        },
+        "policy": (
+            "Reviewed field values fill the review resolution form only; "
+            "they do not write canonical state automatically."
+        ),
+    }
+
+
+def focus_review_item_with_workbench_context(
+    item: dict[str, Any],
+    note_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    enriched = dict(item)
+    evaluator = (
+        enriched.get("hybrid_note_line_evaluator")
+        if isinstance(enriched.get("hybrid_note_line_evaluator"), dict)
+        else {}
+    )
+    if isinstance(evaluator.get("previous_position_candidate"), dict):
+        return enriched
+    issue = str(enriched.get("issue") or "").lower()
+    if "note" not in issue and "unlabeled numeric" not in issue:
+        return enriched
+    for note in note_rows:
+        metadata = json_object(note.get("parsed_metadata_json") or "{}")
+        note_evaluator = metadata.get("hybrid_note_line_evaluator", {})
+        if not isinstance(note_evaluator, dict):
+            continue
+        if not isinstance(note_evaluator.get("previous_position_candidate"), dict):
+            continue
+        enriched["review_note_raw_line"] = note.get("raw_line_text") or enriched.get("review_note_raw_line") or ""
+        enriched["note_item_id"] = note.get("note_item_id") or enriched.get("note_item_id") or ""
+        enriched["review_note_line_number"] = note.get("line_number") or enriched.get("review_note_line_number") or ""
+        enriched["hybrid_note_line_evaluator"] = note_evaluator
+        return enriched
+    return enriched
+
+
 def focus_review_output_first_summary(review_items: list[dict[str, Any]]) -> dict[str, Any]:
     actionable_items = [
         item
@@ -9354,6 +9487,7 @@ def list_review_items() -> list[dict[str, Any]]:
                    review_note.interpreted_status AS review_note_interpreted_status,
                    review_note.parsed_mouse_display_id AS review_note_mouse_display_id,
                    review_note.parsed_count AS review_note_count,
+                   review_note.line_number AS review_note_line_number,
                    review_note.parsed_metadata_json AS review_note_parsed_metadata_json,
                    review_snapshot.card_snapshot_id,
                    review_snapshot.card_type AS review_card_type,
@@ -9395,6 +9529,8 @@ def list_review_items() -> list[dict[str, Any]]:
                                 WHERE note.parse_id = review.parse_id
                                   AND (
                                       note.parsed_type = 'unlabeled_numeric_note'
+                                      OR note.raw_line_text = review.current_value
+                                      OR note.parsed_mouse_display_id = review.current_value
                                       OR note.note_item_id IN (
                                           SELECT correction.entity_id
                                           FROM correction_log correction
@@ -9448,6 +9584,7 @@ def list_review_items() -> list[dict[str, Any]]:
         payload["review_plausibility_findings"] = parse_payload_plausibility_findings(parse_payload)
         payload.update(review_attention_level(payload, parse_payload))
         payload["review_check_targets"] = review_check_targets(payload, parse_payload)
+        payload["field_review_workbench"] = focus_review_workbench_for_item(payload)
         payload.pop("parse_confidence", None)
         result.append(payload)
     return result
@@ -9473,7 +9610,8 @@ def ui_focus_review() -> dict[str, Any]:
             note_rows = conn.execute(
                 f"""
                 SELECT note_item_id, parse_id, card_snapshot_id, line_number, raw_line_text,
-                       parsed_mouse_display_id, interpreted_status, needs_review
+                       parsed_mouse_display_id, interpreted_status, needs_review,
+                       parsed_metadata_json
                 FROM card_note_item_log
                 WHERE parse_id IN ({placeholders})
                 ORDER BY parse_id, line_number, note_item_id
@@ -9535,16 +9673,24 @@ def ui_focus_review() -> dict[str, Any]:
                 "review_count": len(items),
                 "review_items": [
                     {
-                        "review_id": item.get("review_id"),
-                        "issue": item.get("issue"),
-                        "issue_label": focus_review_issue_label(item),
-                        "attention_level": item.get("attention_level"),
-                        "attention_reason": item.get("attention_reason"),
-                        "review_check_targets": item.get("review_check_targets", []),
-                        "evidence_preview": item.get("evidence_preview") or item.get("suggested_value") or "",
-                        "action_hint": focus_review_action_hint(item),
+                        "review_id": enriched_item.get("review_id"),
+                        "issue": enriched_item.get("issue"),
+                        "issue_label": focus_review_issue_label(enriched_item),
+                        "attention_level": enriched_item.get("attention_level"),
+                        "attention_reason": enriched_item.get("attention_reason"),
+                        "review_check_targets": enriched_item.get("review_check_targets", []),
+                        "evidence_preview": (
+                            enriched_item.get("evidence_preview")
+                            or enriched_item.get("suggested_value")
+                            or ""
+                        ),
+                        "action_hint": focus_review_action_hint(enriched_item),
+                        "field_review_workbench": focus_review_workbench_for_item(enriched_item),
                     }
-                    for item in items
+                    for enriched_item in [
+                        focus_review_item_with_workbench_context(item, note_rows)
+                        for item in items
+                    ]
                 ],
                 "mouse_rows": mouse_rows,
                 "collapsed_sections": {

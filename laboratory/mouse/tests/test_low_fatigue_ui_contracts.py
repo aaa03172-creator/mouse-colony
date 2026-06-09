@@ -189,6 +189,117 @@ def test_focus_review_groups_db_backed_review_items_by_photo_card(tmp_path: Path
         db.DB_PATH = old_db_path
 
 
+def test_focus_review_review_item_includes_side_by_side_workbench(tmp_path: Path) -> None:
+    old_db_path = db.DB_PATH
+    try:
+        seed_focus_review_card(tmp_path)
+        client = TestClient(app)
+
+        response = client.get("/api/ui/focus-review")
+
+        assert response.status_code == 200
+        [card] = response.json()["cards"]
+        item = next(
+            review
+            for review in card["review_items"]
+            if review["review_id"] == "review_unlabeled_numeric_parse_focus_review"
+        )
+        workbench = item["field_review_workbench"]
+        assert workbench["source_layer"] == "export or view"
+        assert workbench["canonical"] is False
+        assert workbench["layout"] == "photo_left_fields_right"
+        assert workbench["photo"] == {
+            "photo_id": "photo_focus_review",
+            "image_url": "/api/photos/photo_focus_review/image",
+            "roi_preview_url": "/api/photos/photo_focus_review/roi-preview",
+            "primary_roi_image_url": "",
+            "open_source_photo_label": "Open source photo",
+        }
+        assert workbench["policy"].startswith("Reviewed field values fill the review resolution form only")
+        assert workbench["fields"][0]["field_key"] == "note_line"
+        assert workbench["fields"][0]["label"] == "Note line"
+        assert workbench["fields"][0]["current_value"] == "MT320"
+        assert workbench["fields"][0]["suggested_value"] == "Confirm note-line interpretation."
+        assert workbench["fields"][0]["requires_user_value"] is True
+        assert workbench["fields"][0]["input_type"] == "text"
+        assert workbench["fields"][0]["trace"]["parse_id"] == "parse_focus_review"
+    finally:
+        db.DB_PATH = old_db_path
+
+
+def test_review_items_include_side_by_side_workbench(tmp_path: Path) -> None:
+    old_db_path = db.DB_PATH
+    try:
+        seed_focus_review_card(tmp_path)
+        client = TestClient(app)
+
+        response = client.get("/api/review-items")
+
+        assert response.status_code == 200
+        item = next(
+            review
+            for review in response.json()
+            if review["review_id"] == "review_unlabeled_numeric_parse_focus_review"
+        )
+        workbench = item["field_review_workbench"]
+        assert workbench["canonical"] is False
+        assert workbench["layout"] == "photo_left_fields_right"
+        assert workbench["photo"]["photo_id"] == "photo_focus_review"
+        assert workbench["fields"][0]["current_value"] == "MT320"
+        assert workbench["fields"][0]["trace"]["parse_id"] == "parse_focus_review"
+    finally:
+        db.DB_PATH = old_db_path
+
+
+def test_focus_review_workbench_surfaces_previous_position_hint(tmp_path: Path) -> None:
+    old_db_path = db.DB_PATH
+    try:
+        seed_focus_review_card(tmp_path)
+        with db.connection() as conn:
+            metadata = {
+                "hybrid_note_line_evaluator": {
+                    "previous_position_candidate": {
+                        "suggested_preserved_text": "F2 6p",
+                        "previous_raw_line_text": "F2 6p",
+                        "suggested_status_from_current_strike": "separated",
+                        "previous_trace": {
+                            "photo_id": "photo_previous",
+                            "parse_id": "parse_previous",
+                            "note_item_id": "note_previous_3",
+                            "line_number": 3,
+                            "roi_ref": "note_block:3",
+                        },
+                    }
+                }
+            }
+            conn.execute(
+                """
+                UPDATE card_note_item_log
+                SET raw_line_text = ?, parsed_metadata_json = ?
+                WHERE parse_id = ? AND line_number = ?
+                """,
+                ("F2 6", json.dumps(metadata, ensure_ascii=False), "parse_focus_review", 3),
+            )
+        client = TestClient(app)
+
+        response = client.get("/api/ui/focus-review")
+
+        assert response.status_code == 200
+        [card] = response.json()["cards"]
+        item = next(
+            review
+            for review in card["review_items"]
+            if review["review_id"] == "review_unlabeled_numeric_parse_focus_review"
+        )
+        field = item["field_review_workbench"]["fields"][0]
+        assert field["current_value"] == "F2 6"
+        assert field["previous_confirmed_value"] == "F2 6p"
+        assert field["rule_candidate"] == "separated"
+        assert field["trace"]["roi_ref"] == "note_block:3"
+    finally:
+        db.DB_PATH = old_db_path
+
+
 def test_focus_review_empty_state_does_not_fabricate_colony_data(tmp_path: Path) -> None:
     old_db_path = db.DB_PATH
     try:

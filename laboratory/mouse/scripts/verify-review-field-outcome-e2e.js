@@ -311,6 +311,24 @@ async function fillReviewFieldOutcomeControls(panel) {
   await selectFieldOutcome(panel, "export_provenance", "exact");
 }
 
+async function verifySideBySideWorkbenchControls(panel) {
+  await panel.locator(".field-review-workbench").waitFor();
+  await panel.locator(".field-review-input").first().fill("MT777 R'");
+  await panel.locator(".use-field-review-value").first().click();
+
+  const resolvedValue = await panel.locator(".review-resolved-value").inputValue();
+  assert(
+    resolvedValue === "MT777 R'",
+    `Side-by-side workbench should copy checked value into resolved value; got ${resolvedValue}`
+  );
+
+  const resolutionNote = await panel.locator(".review-resolution-note").inputValue();
+  assert(
+    resolutionNote.includes("Checked from source photo"),
+    `Side-by-side workbench should add a source-photo resolution note; got ${resolutionNote}`
+  );
+}
+
 async function stopServer(server) {
   if (server.exitCode !== null || server.signalCode !== null) return;
   await new Promise((resolve) => {
@@ -383,6 +401,7 @@ async function run() {
     await page.waitForSelector("#reviewDetailPanel .review-accuracy-outcome");
 
     const panel = page.locator("#reviewDetailPanel");
+    await verifySideBySideWorkbenchControls(panel);
     await fillReviewFieldOutcomeControls(panel);
     await panel.locator(".review-audit-taxonomy-status").selectOption("partial_match");
     await panel.locator(".review-audit-taxonomy-note").fill("Operator scored field outcome from source note-line evidence.");
@@ -414,6 +433,14 @@ async function run() {
     assert(
       resolveRequestPayload?.field_review_outcome?.field_scores?.mouse_ids_or_note_lines?.status === "corrected",
       `Browser payload should include corrected mouse-id outcome: ${JSON.stringify(resolveRequestPayload)}`
+    );
+    assert(
+      Boolean(resolveRequestPayload?.field_review_outcome?.checked_workbench_field),
+      `Browser payload should include checked workbench field: ${JSON.stringify(resolveRequestPayload)}`
+    );
+    assert(
+      resolveRequestPayload?.field_review_outcome?.field_review_workbench?.canonical === false,
+      `Browser payload should include non-canonical side-by-side workbench context: ${JSON.stringify(resolveRequestPayload)}`
     );
     assert(
       resolution.field_review_outcome.note_line_scoring_scope === "scored_note_line",

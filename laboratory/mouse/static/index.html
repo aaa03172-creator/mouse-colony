@@ -653,6 +653,79 @@
     .review-actions select {
       margin: 0;
     }
+    .field-review-workbench {
+      display: grid;
+      grid-template-columns: minmax(260px, 0.95fr) minmax(260px, 1.05fr);
+      gap: 12px;
+      align-items: start;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      padding: 10px;
+    }
+    .field-review-photo {
+      display: grid;
+      gap: 8px;
+    }
+    .field-review-photo-frame {
+      min-height: 220px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-soft);
+      overflow: hidden;
+    }
+    .field-review-photo-frame img {
+      width: 100%;
+      height: 100%;
+      max-height: 420px;
+      object-fit: contain;
+      display: block;
+    }
+    .field-review-photo-frame[data-source-photo-state="missing"] .source-photo-missing {
+      display: block;
+    }
+    .field-review-fields {
+      display: grid;
+      gap: 8px;
+    }
+    .field-review-row {
+      display: grid;
+      gap: 5px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-soft);
+      padding: 8px;
+    }
+    .field-review-row label {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 800;
+    }
+    .field-review-candidates {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+      gap: 6px;
+    }
+    .field-review-candidates span {
+      display: grid;
+      gap: 2px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      padding: 6px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .field-review-candidates strong {
+      color: var(--ink);
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+    .field-review-buttons {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
     .review-accuracy-outcome {
       display: grid;
       gap: 8px;
@@ -2581,6 +2654,7 @@
       main { grid-template-columns: 1fr; }
       .full { grid-column: auto; }
       .form-grid { grid-template-columns: 1fr; }
+      .field-review-workbench { grid-template-columns: 1fr; }
       .photo-review-layout { grid-template-columns: 1fr; }
       .photo-review-layout {
         display: flex;
@@ -5962,10 +6036,12 @@
       const failureLabels = noteLineScoringScope === "no_visible_note_line_for_evaluator_scoring"
         ? ["no_visible_note_line_for_evaluator_scoring"]
         : [];
-      const hasFieldReviewOutcome = Boolean(
+      const checkedWorkbenchField = container.dataset.checkedWorkbenchField || "";
+      const hasScoringOutcome = Boolean(
         noteLineScoringScope || failureLabels.length || Object.keys(fieldScores).length
       );
-      if (hasFieldReviewOutcome && !noteLineScoringScope) {
+      const hasFieldReviewOutcome = Boolean(hasScoringOutcome || checkedWorkbenchField);
+      if (hasScoringOutcome && !noteLineScoringScope) {
         const message = container.querySelector(".review-resolution-message");
         if (message) {
           message.textContent = "Choose note-line scope before resolving field accuracy outcome.";
@@ -6049,6 +6125,8 @@
           unresolved_must_review_at_export: false,
           manual_transcription_required: false,
           failure_labels: failureLabels,
+          checked_workbench_field: checkedWorkbenchField,
+          field_review_workbench: item?.field_review_workbench || null,
           field_scores: fieldScores
         };
       }
@@ -6113,6 +6191,37 @@
       });
     }
 
+    function attachFieldReviewWorkbenchHandlers(root = document) {
+      root.querySelectorAll(".use-field-review-value").forEach((button) => {
+        button.addEventListener("click", () => {
+          const row = button.closest(".field-review-row");
+          const workbench = button.closest(".field-review-workbench");
+          const panel = button.closest(".review-detail-panel") || document.getElementById("reviewDetailPanel");
+          const input = row?.querySelector(".field-review-input");
+          const actions = workbench?.nextElementSibling?.querySelector(".review-actions")
+            || panel?.querySelector(".review-actions");
+          const resolvedInput = actions?.querySelector(".review-resolved-value");
+          const noteInput = actions?.querySelector(".review-resolution-note");
+          if (!input || !resolvedInput || !noteInput) return;
+          resolvedInput.value = input.value || "";
+          actions.dataset.checkedWorkbenchField = row?.dataset.fieldKey || "";
+          if (!noteInput.value) {
+            noteInput.value = `Checked from source photo: ${row?.dataset.fieldKey || "reviewed_value"}`;
+          }
+          resolvedInput.focus();
+        });
+      });
+      root.querySelectorAll(".hold-field-review-value").forEach((button) => {
+        button.addEventListener("click", () => {
+          const panel = button.closest(".review-detail-panel") || document.getElementById("reviewDetailPanel");
+          const noteInput = panel?.querySelector(".review-resolution-note");
+          if (noteInput && !noteInput.value) {
+            noteInput.value = "Held for later review; source photo remains unresolved.";
+          }
+        });
+      });
+    }
+
     function selectedReviewPosition() {
       const index = currentVisibleReviews.findIndex((item) => item.review_id === selectedReviewId);
       return {
@@ -6130,6 +6239,7 @@
       selectedReviewId = currentVisibleReviews[nextIndex].review_id;
       renderReviewDetail(currentVisibleReviews[nextIndex]);
       attachReviewResolutionHandlers(document.getElementById("reviewDetailPanel"));
+      attachFieldReviewWorkbenchHandlers(document.getElementById("reviewDetailPanel"));
       attachReviewAuditHandler();
       attachReviewNavigationHandlers();
       document.querySelectorAll("#reviewRows .review-card").forEach((card) => {
@@ -6336,6 +6446,56 @@
       `;
     }
 
+    function reviewFieldInputHtml(field) {
+      const value = field.current_value || field.suggested_value || "";
+      if (field.input_type === "select" && field.field_key === "ear_label") {
+        return `<select class="field-review-input" data-field-key="${escapeHtml(field.field_key)}" aria-label="${escapeHtml(field.label)}">${earLabelReviewOptions({ suggested_value: value })}</select>`;
+      }
+      return `<input class="field-review-input" data-field-key="${escapeHtml(field.field_key)}" type="text" value="${escapeHtml(value)}" aria-label="${escapeHtml(field.label)}">`;
+    }
+
+    function reviewFieldWorkbenchPanel(item) {
+      const workbench = item?.field_review_workbench || {};
+      const fields = Array.isArray(workbench.fields) ? workbench.fields : [];
+      if (!fields.length) return "";
+      const photo = workbench.photo || {};
+      const image = photo.image_url
+        ? `<img src="${escapeHtml(photo.image_url)}" alt="Source cage-card photo for field review" onerror="this.hidden = true; this.closest('.field-review-photo-frame').dataset.sourcePhotoState = 'missing';">
+           <div class="source-photo-missing" role="status">Source photo unavailable in this local run</div>`
+        : `<div class="source-photo-missing" role="status">No source photo attached</div>`;
+      const photoState = photo.image_url ? "ready" : "missing";
+      return `
+        <div class="field-review-workbench" data-review-id="${escapeHtml(item.review_id || "")}">
+          <div class="field-review-photo">
+            <div class="field-review-photo-frame" data-source-photo-state="${escapeHtml(photoState)}">${image}</div>
+            <div class="field-review-buttons">
+              ${photo.photo_id ? `<button class="open-review-source-photo" type="button" data-photo-id="${escapeHtml(photo.photo_id)}">${escapeHtml(photo.open_source_photo_label || "Open source photo")}</button>` : ""}
+              ${photo.roi_preview_url ? `<a class="secondary-link" href="${escapeHtml(photo.roi_preview_url)}" target="_blank" rel="noreferrer">ROI preview</a>` : ""}
+            </div>
+            <p class="muted">${escapeHtml(workbench.policy || "Review values before resolving.")}</p>
+          </div>
+          <div class="field-review-fields">
+            ${fields.map((field) => `
+              <div class="field-review-row" data-field-key="${escapeHtml(field.field_key)}">
+                <label>${escapeHtml(field.label)}</label>
+                ${reviewFieldInputHtml(field)}
+                <div class="field-review-candidates">
+                  <span>Current<strong>${escapeHtml(field.current_value || "--")}</strong></span>
+                  <span>Previous<strong>${escapeHtml(field.previous_confirmed_value || "--")}</strong></span>
+                  <span>Suggested<strong>${escapeHtml(field.suggested_value || "--")}</strong></span>
+                  <span>Rule<strong>${escapeHtml(field.rule_candidate || "--")}</strong></span>
+                </div>
+                <div class="field-review-buttons">
+                  <button class="use-field-review-value" type="button" data-field-key="${escapeHtml(field.field_key)}">${escapeHtml(workbench.actions?.confirm_label || "Use checked value")}</button>
+                  <button class="hold-field-review-value" type="button">${escapeHtml(workbench.actions?.hold_label || "Keep unresolved")}</button>
+                </div>
+              </div>
+            `).join("")}
+          </div>
+        </div>
+      `;
+    }
+
     function renderCanonicalApplyPreview(result) {
       const panel = document.getElementById("canonicalApplyPreviewPanel");
       const blockers = result.blockers || [];
@@ -6416,6 +6576,7 @@
             <span>Local-only draft appears here after loading. It does not resolve the review or write canonical state.</span>
           </div>
         </div>
+        ${reviewFieldWorkbenchPanel(item)}
         <div class="detail-stack">${reviewResolutionControls(item)}</div>
       `;
     }
@@ -8170,6 +8331,7 @@
       `;
       }).join("") || stateMessageHtml("empty", "No review items match the current filters.", "Change the review filters or upload source photos to create reviewable evidence.");
       renderReviewDetail(selectedReview);
+      attachFieldReviewWorkbenchHandlers(document.getElementById("reviewDetailPanel"));
       attachReviewAuditHandler();
       attachReviewNavigationHandlers();
       document.querySelectorAll(".inspect-review").forEach((button) => {
@@ -8177,6 +8339,7 @@
           selectedReviewId = button.dataset.reviewId;
           renderReviewDetail(visibleReviews.find((item) => item.review_id === selectedReviewId));
           attachReviewResolutionHandlers(document.getElementById("reviewDetailPanel"));
+          attachFieldReviewWorkbenchHandlers(document.getElementById("reviewDetailPanel"));
           attachReviewAuditHandler();
           attachReviewNavigationHandlers();
           document.querySelectorAll("#reviewRows .review-card").forEach((card) => {
@@ -8196,6 +8359,7 @@
         });
       });
       attachReviewResolutionHandlers(document);
+      attachFieldReviewWorkbenchHandlers(document);
       document.getElementById("sourceRows").innerHTML = sourceRecords.map((source) =>
         row([source.source_type, source.source_label || "--", source.source_uri || "--", source.imported_at, source.note || "--"])
       ).join("") || emptyTableRow("No source evidence yet", "Raw photos, manual entries, and imported workbook rows will appear here as traceable evidence.", 5);
