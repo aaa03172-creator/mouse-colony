@@ -61,7 +61,8 @@ def test_resolution_payload_includes_checked_workbench_field() -> None:
     start = HTML.index("function reviewResolutionPayload")
     end = HTML.index("async function submitReviewResolution", start)
     payload_block = HTML[start:end]
-    assert "const checkedWorkbenchField = container.dataset.checkedWorkbenchField || \"\"" in payload_block
+    assert "const checkedWorkbenchField = container.dataset.checkedWorkbenchField" in payload_block
+    assert "item?.field_review_workbench?.fields?.[0]?.field_key" in payload_block
     assert "const hasScoringOutcome" in payload_block
     assert "hasScoringOutcome || checkedWorkbenchField" in payload_block
     assert "checked_workbench_field" in payload_block

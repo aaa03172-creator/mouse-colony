@@ -3426,15 +3426,15 @@
     </section>
 
     <section class="full" data-view="exports">
-      <h2>Search & CSV Export</h2>
-      <p>Search across mouse IDs, strains, genotyping fields, review issues, and source evidence.</p>
+      <h2>Preview Search & Worklists</h2>
+      <p>Search reviewable export views and generate preview/worklist files. Final lab files stay below the readiness gate.</p>
       <div class="form-grid">
         <label>
           Search
           <input id="searchQuery" type="text" placeholder="M0231, PV-Cre, genotyping pending, source label">
         </label>
         <button id="searchButton" type="button">Search</button>
-        <button id="exportMouseCsvButton" type="button">Download Mouse CSV</button>
+        <button id="exportMouseCsvButton" type="button">Download Preview Mouse CSV</button>
         <button id="exportGenotypingCsvButton" type="button">Download Genotyping Worklist</button>
       </div>
       <p class="muted" id="exportDownloadMessage"></p>
@@ -4548,7 +4548,7 @@
       if (["Upload Source Photo", "Fixture Parse Results", "Manual Photo Transcription", "Photo Inbox"].includes(heading)) return "photo";
       if (["Review Queue", "Source Evidence", "Correction Log"].includes(heading)) return "review";
       if (["Legacy Workbook Import", "Evidence Reconciliation", "Evidence Comparison", "Canonical Candidate Drafts"].includes(heading)) return "comparison";
-      if (["Search & CSV Export", "Export Readiness", "Export Center"].includes(heading)) return "exports";
+      if (["Preview Search & Worklists", "Export Readiness", "Export Center"].includes(heading)) return "exports";
       if (["My Assigned Strains", "Strain Registry", "Distribution Assignment Import"].includes(heading)) return "settings";
       return "records";
     }
@@ -4980,6 +4980,24 @@
       return `<button class="operations-target-action" type="button" data-target-type="${escapeHtml(targetType)}" data-target-id="${escapeHtml(targetId)}" data-action-channel="${escapeHtml(actionChannel)}">${escapeHtml(label)}</button>`;
     }
 
+    function operationsEvidenceSummary(task) {
+      const refs = task?.evidence_refs || {};
+      const parts = [
+        refs.source_photo_filename ? `Source photo: ${refs.source_photo_filename}` : refs.source_photo_id ? "Source photo linked" : "",
+        task?.target_label ? `Target: ${task.target_label}` : "",
+        refs.blocked_review_count ? `Blocked reviews: ${refs.blocked_review_count}` : "",
+        Array.isArray(refs.review_ids) && refs.review_ids.length ? `Review items: ${refs.review_ids.length}` : "",
+        Array.isArray(refs.candidate_ids) && refs.candidate_ids.length ? `Candidates: ${refs.candidate_ids.length}` : ""
+      ].filter(Boolean);
+      return parts.join("; ") || "Source evidence linked";
+    }
+
+    function operationsDebugDetails(task) {
+      const details = compactDetails(task?.evidence_refs || {});
+      if (details === "--") return "";
+      return `<details class="operations-debug-details"><summary>Debug details</summary><span>${escapeHtml(details)}</span></details>`;
+    }
+
     function renderOperationsHomeReadModel(model) {
       const panel = document.getElementById("operationsHomeReadModel");
       if (!panel) return;
@@ -5023,7 +5041,8 @@
                 <strong>${escapeHtml(task.label || task.task_id || "Operation task")}</strong>
                 <span>${escapeHtml([task.status, task.risk_class, task.target_label].filter(Boolean).join(" / ") || "--")}</span>
                 <span>${escapeHtml(task.blocker_reason || "Review source evidence before acting.")}</span>
-                <span>${escapeHtml(compactDetails(task.evidence_refs || {}))}</span>
+                <span>${escapeHtml(operationsEvidenceSummary(task))}</span>
+                ${operationsDebugDetails(task)}
                 <span class="row-state-chip ${escapeHtml(operationsActionChannelClass(task))}">${escapeHtml(task.action_channel_label || task.action_channel || "Human review")}</span>
                 <span>${escapeHtml(task.action_channel_reason || "")}</span>
                 <span>Payload policy: ${escapeHtml(task.external_payload_policy || "local_only_until_approved")}</span>
@@ -6036,7 +6055,9 @@
       const failureLabels = noteLineScoringScope === "no_visible_note_line_for_evaluator_scoring"
         ? ["no_visible_note_line_for_evaluator_scoring"]
         : [];
-      const checkedWorkbenchField = container.dataset.checkedWorkbenchField || "";
+      const checkedWorkbenchField = container.dataset.checkedWorkbenchField
+        || item?.field_review_workbench?.fields?.[0]?.field_key
+        || "";
       const hasScoringOutcome = Boolean(
         noteLineScoringScope || failureLabels.length || Object.keys(fieldScores).length
       );
