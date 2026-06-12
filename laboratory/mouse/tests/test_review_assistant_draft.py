@@ -107,6 +107,161 @@ def test_static_ui_builds_field_level_accuracy_outcome_payload() -> None:
     assert "Select at least one field outcome before resolving scoring scope." in payload_function
 
 
+def test_static_ui_allows_quick_resolve_only_for_safe_review_issues() -> None:
+    html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+    assert "function reviewAllowsQuickResolve(item)" in html
+    assert '"Low-confidence strain alias"' in html
+    assert '"fixture auto-filled by policy"' in html
+    assert 'item?.attention_level !== "quick_check"' in html
+    assert "reviewAllowsQuickResolve(item)" in html
+
+    start = html.index("function reviewResolutionControls")
+    end = html.index("function reviewCheckTargetsText", start)
+    controls = html[start:end]
+    assert "reviewAllowsQuickResolve(item)" in controls
+    assert "Accept after check" not in controls
+
+
+def test_static_ui_uses_operator_workload_for_primary_review_counts() -> None:
+    html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+    assert '<option value="workload">Actionable Workload</option>' in html
+    assert "function operatorReviewWorkloadCount(reviews)" in html
+
+    start = html.index("function filteredReviews")
+    end = html.index("function reviewAttentionCounts", start)
+    filtered = html[start:end]
+    assert 'reviewStatusFilter === "workload"' in filtered
+    assert 'item.status === "open"' in filtered
+    assert '["must_review", "quick_check"].includes(item.attention_level)' in filtered
+
+    start = html.index("function operatorReviewWorkloadCount")
+    end = html.index("function renderShellStatus", start)
+    helper = html[start:end]
+    assert "reviewAttentionCounts(reviews)" in helper
+    assert "must_review" in helper
+    assert "quick_check" in helper
+    assert "trace_only" not in helper
+    assert "hidden_default" not in helper
+
+    start = html.index("function renderShellStatus")
+    end = html.index("function firstMouse", start)
+    render_shell = html[start:end]
+    assert "const operatorWorkloadCount = operatorReviewWorkloadCount(reviews);" in render_shell
+    assert 'document.getElementById("navReviewCount").textContent = String(operatorWorkloadCount);' in render_shell
+    assert 'document.getElementById("heroOpenReviews").textContent = String(operatorWorkloadCount);' in render_shell
+    assert 'document.getElementById("topOpenReviews").textContent = `${operatorWorkloadCount} review task' in render_shell
+    assert "openReviewCount} open reviews" not in render_shell
+
+
+def test_static_ui_labels_ai_draft_as_approval_required_when_available() -> None:
+    html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+    start = html.index("function renderShellStatus")
+    end = html.index("function firstMouse", start)
+    render_shell = html[start:end]
+
+    assert "aiStatus.approval_required" in render_shell
+    assert "AI draft: approval required" in render_shell
+    assert "local + AI draft ready" not in render_shell
+    assert "uploaded photos will be extracted automatically" not in html
+    assert "button approval" in html
+
+
+def test_static_ui_renders_source_photo_missing_state() -> None:
+    html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+    start = html.index("function reviewSourceEvidencePanel")
+    end = html.index("function renderReviewDetail", start)
+    source_panel = html[start:end]
+
+    assert "source-photo-frame" in source_panel
+    assert "source-photo-missing" in source_panel
+    assert "Source photo unavailable in this local run" in source_panel
+    assert "data-source-photo-state" in source_panel
+    assert "onerror=" in source_panel
+    assert "this.hidden = true" in source_panel
+
+
+def test_static_ui_renders_focus_review_output_first_summary() -> None:
+    html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+    start = html.index("function renderFocusReviewReadModel")
+    end = html.index("function operationsRiskTone", start)
+    render_function = html[start:end]
+
+    assert "model?.output_first" in render_function
+    assert "show_result_first" in render_function
+    assert "primary_output_label" in render_function
+    assert "result_status" in render_function
+    assert "exception_count" in render_function
+    assert "visible_exception_count" in render_function
+    assert "remaining_exception_count" in render_function
+    assert "overflow_action" in render_function
+    assert "exceptions" in render_function
+    assert "small exception list" in render_function
+    assert "showing" in render_function
+    assert "remaining" in render_function
+    assert "review-output-first" in render_function
+    assert "open-output-exception-review" in render_function
+    assert "open-output-exception-photo" in render_function
+    assert "open-output-exception-overflow" in render_function
+    assert "data-review-id" in render_function
+    assert "data-target-view" in render_function
+    assert "data-source-photo-id" in render_function
+    assert "openOutputExceptionReview" in render_function
+    assert "openOutputExceptionPhoto" in render_function
+    assert "openOutputExceptionOverflow" in render_function
+
+    start = html.index("function openOutputExceptionReview")
+    end = html.index("function openOutputExceptionPhoto", start)
+    handler = html[start:end]
+    assert 'reviewStatusFilter = "focus"' in handler
+    assert 'reviewSeverityFilter = "all"' in handler
+    assert 'reviewEvidenceFilter = "all"' in handler
+    assert 'reviewRoleFilter = "all"' in handler
+    assert "selectedReviewId = reviewId" in handler
+    assert 'setActiveView(targetView || "review")' in handler
+    assert "refresh()" in handler
+
+    start = html.index("function openOutputExceptionPhoto")
+    end = html.index("function operationsRiskTone", start)
+    photo_handler = html[start:end]
+    assert "setActiveView(\"photo\")" in photo_handler
+    assert "selectedTranscriptionPhotoId = photoId" in photo_handler
+    assert "await refresh()" in photo_handler
+    assert "setTranscriptionPhoto(photoId)" in photo_handler
+    assert "Source photo opened from output-first exception" in photo_handler
+
+    start = html.index("function openOutputExceptionOverflow")
+    end = html.index("function operationsRiskTone", start)
+    overflow_handler = html[start:end]
+    assert 'reviewStatusFilter = "workload"' in overflow_handler
+    assert 'reviewStatusFilter = "all"' not in overflow_handler
+    assert 'reviewStatusFilter = "focus"' not in overflow_handler
+    assert 'reviewSeverityFilter = "all"' in overflow_handler
+    assert 'reviewEvidenceFilter = "all"' in overflow_handler
+    assert 'reviewRoleFilter = "all"' in overflow_handler
+    assert 'setActiveView("review")' in overflow_handler
+    assert "refresh()" in overflow_handler
+
+
+def test_static_ui_routes_pedigree_relationship_action_to_mouse_detail() -> None:
+    html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+    start = html.index("function renderMousePedigreeReadModel")
+    end = html.index("function renderEvidenceLedgerReadModel", start)
+    render_function = html[start:end]
+
+    assert "open-pedigree-action" in render_function
+    assert "link.target_view ||" in render_function
+    assert "data-view-target" in render_function
+    assert "selectedAuditMouseId = mouse.mouse_id" in render_function
+    assert "setActiveView(targetView)" in render_function
+    assert 'setActiveView("review")' not in render_function
+
+
 def test_static_ui_warns_before_mapping_trace_only_candidate_and_refreshes_after_apply() -> None:
     html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
 

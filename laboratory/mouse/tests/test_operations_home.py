@@ -27,6 +27,19 @@ def test_static_ui_exposes_operations_home_surface() -> None:
     assert "data-action-channel" in html
 
 
+def test_static_operations_home_uses_operator_evidence_summary() -> None:
+    html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    start = html.index("function renderOperationsHomeReadModel")
+    end = html.index('document.querySelectorAll(".operations-target-action")', start)
+    render_block = html[start:end]
+
+    assert "function operationsEvidenceSummary" in html
+    assert "operationsEvidenceSummary(task)" in render_block
+    assert "compactDetails(task.evidence_refs || {})" not in render_block
+    assert "operationsDebugDetails(task)" in render_block
+    assert "Debug details" in html
+
+
 def test_static_operations_home_target_actions_refresh_selected_views() -> None:
     html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
     start = html.index('document.querySelectorAll(".operations-target-action")')

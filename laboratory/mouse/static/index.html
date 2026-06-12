@@ -653,6 +653,79 @@
     .review-actions select {
       margin: 0;
     }
+    .field-review-workbench {
+      display: grid;
+      grid-template-columns: minmax(260px, 0.95fr) minmax(260px, 1.05fr);
+      gap: 12px;
+      align-items: start;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      padding: 10px;
+    }
+    .field-review-photo {
+      display: grid;
+      gap: 8px;
+    }
+    .field-review-photo-frame {
+      min-height: 220px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-soft);
+      overflow: hidden;
+    }
+    .field-review-photo-frame img {
+      width: 100%;
+      height: 100%;
+      max-height: 420px;
+      object-fit: contain;
+      display: block;
+    }
+    .field-review-photo-frame[data-source-photo-state="missing"] .source-photo-missing {
+      display: block;
+    }
+    .field-review-fields {
+      display: grid;
+      gap: 8px;
+    }
+    .field-review-row {
+      display: grid;
+      gap: 5px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-soft);
+      padding: 8px;
+    }
+    .field-review-row label {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 800;
+    }
+    .field-review-candidates {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+      gap: 6px;
+    }
+    .field-review-candidates span {
+      display: grid;
+      gap: 2px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      padding: 6px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .field-review-candidates strong {
+      color: var(--ink);
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+    .field-review-buttons {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
     .review-accuracy-outcome {
       display: grid;
       gap: 8px;
@@ -1075,6 +1148,23 @@
     }
     .review-source-preview img:not([src]) {
       display: none;
+    }
+    .source-photo-frame {
+      display: grid;
+      gap: 6px;
+    }
+    .source-photo-missing {
+      display: none;
+      border: 1px dashed var(--line);
+      border-radius: 6px;
+      padding: 16px;
+      background: #f8faf9;
+      color: var(--muted);
+      font-size: 13px;
+      text-align: center;
+    }
+    .source-photo-frame[data-source-photo-state="missing"] .source-photo-missing {
+      display: block;
     }
     .review-source-grid {
       display: grid;
@@ -2564,6 +2654,7 @@
       main { grid-template-columns: 1fr; }
       .full { grid-column: auto; }
       .form-grid { grid-template-columns: 1fr; }
+      .field-review-workbench { grid-template-columns: 1fr; }
       .photo-review-layout { grid-template-columns: 1fr; }
       .photo-review-layout {
         display: flex;
@@ -3335,15 +3426,15 @@
     </section>
 
     <section class="full" data-view="exports">
-      <h2>Search & CSV Export</h2>
-      <p>Search across mouse IDs, strains, genotyping fields, review issues, and source evidence.</p>
+      <h2>Preview Search & Worklists</h2>
+      <p>Search reviewable export views and generate preview/worklist files. Final lab files stay below the readiness gate.</p>
       <div class="form-grid">
         <label>
           Search
           <input id="searchQuery" type="text" placeholder="M0231, PV-Cre, genotyping pending, source label">
         </label>
         <button id="searchButton" type="button">Search</button>
-        <button id="exportMouseCsvButton" type="button">Download Mouse CSV</button>
+        <button id="exportMouseCsvButton" type="button">Download Preview Mouse CSV</button>
         <button id="exportGenotypingCsvButton" type="button">Download Genotyping Worklist</button>
       </div>
       <p class="muted" id="exportDownloadMessage"></p>
@@ -3386,6 +3477,7 @@
         <label>
           Status
           <select id="reviewStatusFilter">
+            <option value="workload">Actionable Workload</option>
             <option value="focus">Focus Review</option>
             <option value="quick">Quick Check</option>
             <option value="trace">Trace Only</option>
@@ -3444,6 +3536,15 @@
               <strong>Loading review summary</strong>
               <span>Waiting for source-backed review items without fabricating counts.</span>
             </div>
+          </div>
+          <div class="focus-review-read-model" id="dataGuardianPanel" data-review-queue-endpoint="/api/data-guardian/review-queue" aria-live="polite">
+            <h3>데이터 지킴이 · 무스</h3>
+            <div class="state-message" data-state-kind="loading">
+              <strong>무스가 자동 재확인 항목을 준비합니다.</strong>
+              <span>canonical 값은 아직 변경되지 않았습니다. 원본 사진, note-line evidence, Excel row 근거가 있는 항목만 검토 큐로 남깁니다.</span>
+            </div>
+            <div class="review-queue-summary" id="dataGuardianSummaryCounts"></div>
+            <div class="review-card-list" id="dataGuardianReviewItems" aria-label="Data Guardian review items"></div>
           </div>
           <div class="review-queue-summary" id="reviewQueueSummary"></div>
           <div class="review-follow-through" id="reviewFollowThrough" role="status" aria-live="polite"></div>
@@ -4071,6 +4172,7 @@
       const rowStateLabels = {
         ready: "Ready",
         blocked_by_review: "Blocked",
+        blocked_by_litter_conflict: "Litter conflict",
         stale_after_correction: "Stale"
       };
       const rowStateLabel = rowStateLabels[rowState] || (previewReady && !hasUncertainty ? "Ready" : "Blocked");
@@ -4455,7 +4557,7 @@
       if (["Upload Source Photo", "Fixture Parse Results", "Manual Photo Transcription", "Photo Inbox"].includes(heading)) return "photo";
       if (["Review Queue", "Source Evidence", "Correction Log"].includes(heading)) return "review";
       if (["Legacy Workbook Import", "Evidence Reconciliation", "Evidence Comparison", "Canonical Candidate Drafts"].includes(heading)) return "comparison";
-      if (["Search & CSV Export", "Export Readiness", "Export Center"].includes(heading)) return "exports";
+      if (["Preview Search & Worklists", "Export Readiness", "Export Center"].includes(heading)) return "exports";
       if (["My Assigned Strains", "Strain Registry", "Distribution Assignment Import"].includes(heading)) return "settings";
       return "records";
     }
@@ -4519,7 +4621,9 @@
     function filteredReviews(reviews) {
       return reviews.filter((item) => {
         const statusMatch =
-          reviewStatusFilter === "focus"
+          reviewStatusFilter === "workload"
+            ? item.status === "open" && ["must_review", "quick_check"].includes(item.attention_level)
+            : reviewStatusFilter === "focus"
             ? item.status === "open" && item.attention_level === "must_review"
             : reviewStatusFilter === "quick"
               ? item.status === "open" && item.attention_level === "quick_check"
@@ -4702,13 +4806,61 @@
       if (!panel) return;
       const cards = Array.isArray(model?.cards) ? model.cards : [];
       const workload = model?.workload_summary || {};
+      const outputFirst = model?.output_first || {};
+      const outputExceptions = Array.isArray(outputFirst.exceptions) ? outputFirst.exceptions : [];
+      const overflowAction = outputFirst.overflow_action || {};
       const emptyState = model?.empty_state || {};
       const fabricatedRecords = emptyState.fabricated_records === true;
       const hasWorkloadCounts = Number.isFinite(workload.must_review) && Number.isFinite(workload.quick_check);
       const counts = model?.load_error || !hasWorkloadCounts
         ? ["Counts unavailable"]
         : [`Must review ${Number(workload.must_review || 0)}`, `Quick check ${Number(workload.quick_check || 0)}`];
+      const outputFirstHtml = outputFirst.show_result_first ? `
+        <div class="review-output-first">
+          <div class="section-kicker">
+            <div>
+              <h3>${escapeHtml(outputFirst.primary_output_label || "Animal sheet draft")}</h3>
+              <p>${escapeHtml(outputFirst.headline || "Draft generated; review exceptions before final export.")}</p>
+            </div>
+            <span class="chip">${escapeHtml(String(outputFirst.result_status || "draft").replaceAll("-", " "))}</span>
+          </div>
+          <div class="review-queue-summary">
+            <span class="chip">small exception list ${escapeHtml(outputFirst.exception_count || 0)}</span>
+            <span class="chip">showing ${escapeHtml(outputFirst.visible_exception_count || outputExceptions.length || 0)}</span>
+            <span class="chip">remaining ${escapeHtml(outputFirst.remaining_exception_count || 0)}</span>
+            <span class="chip">Must review ${escapeHtml(outputFirst.must_review_count || 0)}</span>
+            <span class="chip">Quick check ${escapeHtml(outputFirst.quick_check_count || 0)}</span>
+            <span class="chip">Final export ${outputFirst.final_export_blocked ? "blocked" : "ready"}</span>
+            ${overflowAction.label ? `
+              <button class="open-output-exception-overflow" type="button"
+                data-target-view="${escapeHtml(overflowAction.target_view || "review")}">
+                ${escapeHtml(overflowAction.label)}
+              </button>
+            ` : ""}
+          </div>
+          ${outputExceptions.length ? `
+            <div class="review-meta">
+              ${outputExceptions.slice(0, 3).map((item) => `
+                <button class="open-output-exception-review" type="button"
+                  data-review-id="${escapeHtml(item.target_review_id || item.review_id || "")}"
+                  data-target-view="${escapeHtml(item.target_view || "review")}"
+                  data-source-photo-id="${escapeHtml(item.source_photo_id || "")}">
+                  ${escapeHtml(item.action_label || "Inspect source evidence")}
+                </button>
+                ${item.source_photo_id ? `
+                  <button class="open-output-exception-photo" type="button"
+                    data-source-photo-id="${escapeHtml(item.source_photo_id)}"
+                    aria-label="Open source photo for ${escapeHtml(item.issue || "review item")}">Photo</button>
+                ` : ""}
+                <span class="chip">${escapeHtml(item.issue || "Review item")}</span>
+                <span class="chip">${escapeHtml(item.attention_level || "review")}</span>
+              `).join("")}
+            </div>
+          ` : ""}
+        </div>
+      ` : "";
       const summary = `
+        ${outputFirstHtml}
         <div class="section-kicker">
           <div>
             <h3>Focus Review</h3>
@@ -4762,6 +4914,95 @@
           </div>
         `;
       }).join("")}`;
+      panel.querySelectorAll(".open-output-exception-review").forEach((button) => {
+        button.addEventListener("click", () => openOutputExceptionReview(button.dataset.reviewId, button.dataset.targetView));
+      });
+      panel.querySelectorAll(".open-output-exception-photo").forEach((button) => {
+        button.addEventListener("click", async () => openOutputExceptionPhoto(button.dataset.sourcePhotoId));
+      });
+      panel.querySelectorAll(".open-output-exception-overflow").forEach((button) => {
+        button.addEventListener("click", async () => openOutputExceptionOverflow(button.dataset.targetView));
+      });
+    }
+
+    function renderDataGuardianSummary(payload) {
+      const countsTarget = document.getElementById("dataGuardianSummaryCounts");
+      const itemsTarget = document.getElementById("dataGuardianReviewItems");
+      if (!countsTarget || !itemsTarget) return;
+      const items = Array.isArray(payload?.items) ? payload.items : [];
+      const counts = items.reduce((acc, item) => {
+        const status = item.risk_status || "unknown";
+        acc[status] = (acc[status] || 0) + 1;
+        return acc;
+      }, {});
+      const countLabels = [
+        `Review ${items.length}`,
+        `Photo ${counts.photo_check_required || 0}`,
+        `Conflict ${counts.conflict_review || 0}`,
+        `Quick ${counts.quick_review || 0}`,
+        `Blocked ${counts.blocked || 0}`
+      ];
+      countsTarget.innerHTML = countLabels
+        .map((label) => `<span class="chip">${escapeHtml(label)}</span>`)
+        .join("");
+      itemsTarget.innerHTML = items.slice(0, 5).map((item) => {
+        const reasons = Array.isArray(item.risk_reasons) ? item.risk_reasons.join(", ") : item.risk_reasons_json || "";
+        return `
+          <article class="review-card" data-data-guardian-review-id="${escapeHtml(item.review_id || "")}">
+            <div class="review-card-content">
+              <span class="review-card-kind warn">Mus</span>
+              <h3>${escapeHtml(item.field_key || "field review")}</h3>
+              <p>${escapeHtml(item.risk_status || "review_required")}</p>
+              <div class="review-evidence">${escapeHtml(reasons || "Evidence-backed review item")}</div>
+            </div>
+          </article>
+        `;
+      }).join("") || '<p class="muted">Mus has no open review items.</p>';
+    }
+
+    async function loadDataGuardianSummary() {
+      const panel = document.getElementById("dataGuardianPanel");
+      if (!panel) return;
+      try {
+        const payload = await api(panel.dataset.reviewQueueEndpoint || "/api/data-guardian/review-queue");
+        renderDataGuardianSummary(payload);
+      } catch (error) {
+        const countsTarget = document.getElementById("dataGuardianSummaryCounts");
+        if (countsTarget) {
+          countsTarget.innerHTML = `<span class="chip warn">${escapeHtml(apiErrorMessage(error))}</span>`;
+        }
+      }
+    }
+
+    async function openOutputExceptionReview(reviewId, targetView = "review") {
+      if (!reviewId) return;
+      reviewStatusFilter = "focus";
+      reviewSeverityFilter = "all";
+      reviewEvidenceFilter = "all";
+      reviewRoleFilter = "all";
+      selectedReviewId = reviewId;
+      setActiveView(targetView || "review");
+      await refresh();
+    }
+
+    async function openOutputExceptionPhoto(photoId) {
+      if (!photoId) return;
+      setActiveView("photo");
+      selectedTranscriptionPhotoId = photoId;
+      await refresh();
+      setTranscriptionPhoto(photoId);
+      document.getElementById("viewSubtitle").textContent =
+        "Source photo opened from output-first exception. Raw photo and extracted evidence remain traceable.";
+    }
+
+    async function openOutputExceptionOverflow(targetView = "review") {
+      reviewStatusFilter = "workload";
+      reviewSeverityFilter = "all";
+      reviewEvidenceFilter = "all";
+      reviewRoleFilter = "all";
+      selectedReviewId = "";
+      setActiveView("review");
+      await refresh();
     }
 
     function operationsRiskTone(task) {
@@ -4795,6 +5036,24 @@
                 ? "Open mouse"
                 : "Open target";
       return `<button class="operations-target-action" type="button" data-target-type="${escapeHtml(targetType)}" data-target-id="${escapeHtml(targetId)}" data-action-channel="${escapeHtml(actionChannel)}">${escapeHtml(label)}</button>`;
+    }
+
+    function operationsEvidenceSummary(task) {
+      const refs = task?.evidence_refs || {};
+      const parts = [
+        refs.source_photo_filename ? `Source photo: ${refs.source_photo_filename}` : refs.source_photo_id ? "Source photo linked" : "",
+        task?.target_label ? `Target: ${task.target_label}` : "",
+        refs.blocked_review_count ? `Blocked reviews: ${refs.blocked_review_count}` : "",
+        Array.isArray(refs.review_ids) && refs.review_ids.length ? `Review items: ${refs.review_ids.length}` : "",
+        Array.isArray(refs.candidate_ids) && refs.candidate_ids.length ? `Candidates: ${refs.candidate_ids.length}` : ""
+      ].filter(Boolean);
+      return parts.join("; ") || "Source evidence linked";
+    }
+
+    function operationsDebugDetails(task) {
+      const details = compactDetails(task?.evidence_refs || {});
+      if (details === "--") return "";
+      return `<details class="operations-debug-details"><summary>Debug details</summary><span>${escapeHtml(details)}</span></details>`;
     }
 
     function renderOperationsHomeReadModel(model) {
@@ -4840,7 +5099,8 @@
                 <strong>${escapeHtml(task.label || task.task_id || "Operation task")}</strong>
                 <span>${escapeHtml([task.status, task.risk_class, task.target_label].filter(Boolean).join(" / ") || "--")}</span>
                 <span>${escapeHtml(task.blocker_reason || "Review source evidence before acting.")}</span>
-                <span>${escapeHtml(compactDetails(task.evidence_refs || {}))}</span>
+                <span>${escapeHtml(operationsEvidenceSummary(task))}</span>
+                ${operationsDebugDetails(task)}
                 <span class="row-state-chip ${escapeHtml(operationsActionChannelClass(task))}">${escapeHtml(task.action_channel_label || task.action_channel || "Human review")}</span>
                 <span>${escapeHtml(task.action_channel_reason || "")}</span>
                 <span>Payload policy: ${escapeHtml(task.external_payload_policy || "local_only_until_approved")}</span>
@@ -5196,7 +5456,7 @@
             <p>Unconfirmed relationships are not inferred.</p>
             <div class="review-meta">
               ${pendingFields.map((field) => `<span class="chip warn">${escapeHtml(field.field)} ${escapeHtml(field.value || "Parent pending")}</span>`).join("")}
-              ${attentionLinks.map((link) => `<button class="open-focus-review" type="button" data-view-target="review">${escapeHtml(link.label || "Open Focus Review")}</button>`).join("")}
+              ${attentionLinks.map((link) => `<button class="open-pedigree-action" type="button" data-view-target="${escapeHtml(link.target_view || "review")}" data-action-reason="${escapeHtml(link.reason || "")}">${escapeHtml(link.label || "Open Focus Review")}</button>`).join("")}
             </div>
           </div>
         ` : `
@@ -5229,8 +5489,12 @@
           </div>
         </div>
       `;
-      panel.querySelectorAll(".open-focus-review").forEach((button) => {
-        button.addEventListener("click", () => setActiveView("review"));
+      panel.querySelectorAll(".open-pedigree-action").forEach((button) => {
+        button.addEventListener("click", () => {
+          const targetView = button.dataset.viewTarget || "review";
+          if (targetView === "mouse-detail" && mouse.mouse_id) selectedAuditMouseId = mouse.mouse_id;
+          setActiveView(targetView);
+        });
       });
     }
 
@@ -5516,14 +5780,20 @@
       ).join("");
     }
 
+    function reviewAllowsQuickResolve(item) {
+      if (!item || item.status !== "open" || item?.attention_level !== "quick_check") return false;
+      const safeQuickResolveIssues = [
+        "Low-confidence strain alias",
+        "fixture auto-filled by policy"
+      ];
+      const issueKey = String(item.issue || "").trim().toLowerCase();
+      return safeQuickResolveIssues.some((issue) => issue.toLowerCase() === issueKey);
+    }
+
     function reviewResolutionControls(item) {
       if (!item || item.status !== "open") return escapeHtml(item?.resolution_note || "Resolved");
-      const quickLabel = item.attention_level === "must_review" ? "Accept after check" : "Looks OK";
-      const allowQuickResolve = ![
-        "Unlabeled numeric note needs review",
-        "Ear label needs review",
-        "Legacy strain registry candidate requires review"
-      ].includes(item.issue);
+      const quickLabel = "Looks OK";
+      const allowQuickResolve = reviewAllowsQuickResolve(item);
       const currentCandidate = (() => {
         try {
           return JSON.parse(item.current_value || "{}");
@@ -5794,6 +6064,7 @@
     }
 
     function reviewResolutionPayload(button, item, allowAutoNote) {
+      if (!button) return null;
       const container = button.closest(".review-actions");
       if (!container) {
         return {
@@ -5842,10 +6113,14 @@
       const failureLabels = noteLineScoringScope === "no_visible_note_line_for_evaluator_scoring"
         ? ["no_visible_note_line_for_evaluator_scoring"]
         : [];
-      const hasFieldReviewOutcome = Boolean(
+      const checkedWorkbenchField = container.dataset.checkedWorkbenchField
+        || item?.field_review_workbench?.fields?.[0]?.field_key
+        || "";
+      const hasScoringOutcome = Boolean(
         noteLineScoringScope || failureLabels.length || Object.keys(fieldScores).length
       );
-      if (hasFieldReviewOutcome && !noteLineScoringScope) {
+      const hasFieldReviewOutcome = Boolean(hasScoringOutcome || checkedWorkbenchField);
+      if (hasScoringOutcome && !noteLineScoringScope) {
         const message = container.querySelector(".review-resolution-message");
         if (message) {
           message.textContent = "Choose note-line scope before resolving field accuracy outcome.";
@@ -5929,6 +6204,8 @@
           unresolved_must_review_at_export: false,
           manual_transcription_required: false,
           failure_labels: failureLabels,
+          checked_workbench_field: checkedWorkbenchField,
+          field_review_workbench: item?.field_review_workbench || null,
           field_scores: fieldScores
         };
       }
@@ -5936,6 +6213,7 @@
     }
 
     async function submitReviewResolution(button, item, allowAutoNote) {
+      if (!button) return;
       const payload = reviewResolutionPayload(button, item, allowAutoNote);
       if (!payload) return;
       const container = button.closest(".review-actions");
@@ -5992,6 +6270,37 @@
       });
     }
 
+    function attachFieldReviewWorkbenchHandlers(root = document) {
+      root.querySelectorAll(".use-field-review-value").forEach((button) => {
+        button.addEventListener("click", () => {
+          const row = button.closest(".field-review-row");
+          const workbench = button.closest(".field-review-workbench");
+          const panel = button.closest(".review-detail-panel") || document.getElementById("reviewDetailPanel");
+          const input = row?.querySelector(".field-review-input");
+          const actions = workbench?.nextElementSibling?.querySelector(".review-actions")
+            || panel?.querySelector(".review-actions");
+          const resolvedInput = actions?.querySelector(".review-resolved-value");
+          const noteInput = actions?.querySelector(".review-resolution-note");
+          if (!input || !resolvedInput || !noteInput) return;
+          resolvedInput.value = input.value || "";
+          actions.dataset.checkedWorkbenchField = row?.dataset.fieldKey || "";
+          if (!noteInput.value) {
+            noteInput.value = `Checked from source photo: ${row?.dataset.fieldKey || "reviewed_value"}`;
+          }
+          resolvedInput.focus();
+        });
+      });
+      root.querySelectorAll(".hold-field-review-value").forEach((button) => {
+        button.addEventListener("click", () => {
+          const panel = button.closest(".review-detail-panel") || document.getElementById("reviewDetailPanel");
+          const noteInput = panel?.querySelector(".review-resolution-note");
+          if (noteInput && !noteInput.value) {
+            noteInput.value = "Held for later review; source photo remains unresolved.";
+          }
+        });
+      });
+    }
+
     function selectedReviewPosition() {
       const index = currentVisibleReviews.findIndex((item) => item.review_id === selectedReviewId);
       return {
@@ -6009,6 +6318,7 @@
       selectedReviewId = currentVisibleReviews[nextIndex].review_id;
       renderReviewDetail(currentVisibleReviews[nextIndex]);
       attachReviewResolutionHandlers(document.getElementById("reviewDetailPanel"));
+      attachFieldReviewWorkbenchHandlers(document.getElementById("reviewDetailPanel"));
       attachReviewAuditHandler();
       attachReviewNavigationHandlers();
       document.querySelectorAll("#reviewRows .review-card").forEach((card) => {
@@ -6053,9 +6363,17 @@
         item.review_id && "review-item",
         item.card_snapshot_id && ["excel-row", "Card snapshot"]
       ];
+      const sourcePhotoFrame = item.image_url
+        ? `<div class="source-photo-frame" data-source-photo-state="ready">
+            <img src="${escapeHtml(item.image_url)}" alt="Source cage-card photo for selected review" onerror="this.hidden = true; this.closest('.source-photo-frame').dataset.sourcePhotoState = 'missing';">
+            <div class="source-photo-missing" role="status">Source photo unavailable in this local run</div>
+          </div>`
+        : `<div class="source-photo-frame" data-source-photo-state="missing">
+            <div class="source-photo-missing" role="status">${escapeHtml(item.photo_id ? "Source photo unavailable in this local run" : "No source photo attached to this review item")}</div>
+          </div>`;
       return `
         <div class="review-source-preview">
-          ${item.image_url ? `<img src="${escapeHtml(item.image_url)}" alt="Source cage-card photo for selected review">` : ""}
+          ${sourcePhotoFrame}
           ${evidenceBadgeList(badgeItems)}
           <div class="review-source-grid">
             ${sourceCells.map(([label, value]) => `<span>${escapeHtml(label)}<strong>${escapeHtml(value)}</strong></span>`).join("")}
@@ -6207,6 +6525,56 @@
       `;
     }
 
+    function reviewFieldInputHtml(field) {
+      const value = field.current_value || field.suggested_value || "";
+      if (field.input_type === "select" && field.field_key === "ear_label") {
+        return `<select class="field-review-input" data-field-key="${escapeHtml(field.field_key)}" aria-label="${escapeHtml(field.label)}">${earLabelReviewOptions({ suggested_value: value })}</select>`;
+      }
+      return `<input class="field-review-input" data-field-key="${escapeHtml(field.field_key)}" type="text" value="${escapeHtml(value)}" aria-label="${escapeHtml(field.label)}">`;
+    }
+
+    function reviewFieldWorkbenchPanel(item) {
+      const workbench = item?.field_review_workbench || {};
+      const fields = Array.isArray(workbench.fields) ? workbench.fields : [];
+      if (!fields.length) return "";
+      const photo = workbench.photo || {};
+      const image = photo.image_url
+        ? `<img src="${escapeHtml(photo.image_url)}" alt="Source cage-card photo for field review" onerror="this.hidden = true; this.closest('.field-review-photo-frame').dataset.sourcePhotoState = 'missing';">
+           <div class="source-photo-missing" role="status">Source photo unavailable in this local run</div>`
+        : `<div class="source-photo-missing" role="status">No source photo attached</div>`;
+      const photoState = photo.image_url ? "ready" : "missing";
+      return `
+        <div class="field-review-workbench" data-review-id="${escapeHtml(item.review_id || "")}">
+          <div class="field-review-photo">
+            <div class="field-review-photo-frame" data-source-photo-state="${escapeHtml(photoState)}">${image}</div>
+            <div class="field-review-buttons">
+              ${photo.photo_id ? `<button class="open-review-source-photo" type="button" data-photo-id="${escapeHtml(photo.photo_id)}">${escapeHtml(photo.open_source_photo_label || "Open source photo")}</button>` : ""}
+              ${photo.roi_preview_url ? `<a class="secondary-link" href="${escapeHtml(photo.roi_preview_url)}" target="_blank" rel="noreferrer">ROI preview</a>` : ""}
+            </div>
+            <p class="muted">${escapeHtml(workbench.policy || "Review values before resolving.")}</p>
+          </div>
+          <div class="field-review-fields">
+            ${fields.map((field) => `
+              <div class="field-review-row" data-field-key="${escapeHtml(field.field_key)}">
+                <label>${escapeHtml(field.label)}</label>
+                ${reviewFieldInputHtml(field)}
+                <div class="field-review-candidates">
+                  <span>Current<strong>${escapeHtml(field.current_value || "--")}</strong></span>
+                  <span>Previous<strong>${escapeHtml(field.previous_confirmed_value || "--")}</strong></span>
+                  <span>Suggested<strong>${escapeHtml(field.suggested_value || "--")}</strong></span>
+                  <span>Rule<strong>${escapeHtml(field.rule_candidate || "--")}</strong></span>
+                </div>
+                <div class="field-review-buttons">
+                  <button class="use-field-review-value" type="button" data-field-key="${escapeHtml(field.field_key)}">${escapeHtml(workbench.actions?.confirm_label || "Use checked value")}</button>
+                  <button class="hold-field-review-value" type="button">${escapeHtml(workbench.actions?.hold_label || "Keep unresolved")}</button>
+                </div>
+              </div>
+            `).join("")}
+          </div>
+        </div>
+      `;
+    }
+
     function renderCanonicalApplyPreview(result) {
       const panel = document.getElementById("canonicalApplyPreviewPanel");
       const blockers = result.blockers || [];
@@ -6287,6 +6655,7 @@
             <span>Local-only draft appears here after loading. It does not resolve the review or write canonical state.</span>
           </div>
         </div>
+        ${reviewFieldWorkbenchPanel(item)}
         <div class="detail-stack">${reviewResolutionControls(item)}</div>
       `;
     }
@@ -6495,25 +6864,42 @@
       return Array.from(new Set(items.map((item) => String(item || "").trim()).filter(Boolean)));
     }
 
+    function operatorReviewWorkloadCount(reviews) {
+      const counts = reviewAttentionCounts(reviews);
+      return Number(counts.must_review || 0) + Number(counts.quick_check || 0);
+    }
+
     function renderShellStatus({ health, photoWorkbench, photos, reviews, mice, evidenceComparison, preview }) {
       const openReviewCount = reviews.filter((item) => item.status === "open").length;
+      const operatorWorkloadCount = operatorReviewWorkloadCount(reviews);
       const pendingPhotoCount = photoWorkbench.pending_transcription_count || 0;
       const comparisons = evidenceComparison.comparisons || [];
       const comparisonReviewCount = comparisons.filter((item) => item.review_required || item.review_status === "open").length;
+      const commonExportReady = Boolean(preview.ready);
+      const animalSheetReady = Boolean(preview.animal_sheet_ready ?? preview.ready);
+      const allFinalExportsReady = commonExportReady && animalSheetReady;
+      const animalSheetValidationBlockerCount = Number(preview.animal_sheet_validation_blocker_items || 0);
+      const topExportLabel = allFinalExportsReady
+        ? "Export ready"
+        : commonExportReady && animalSheetValidationBlockerCount
+          ? "Animal sheet review"
+          : `${preview.blocked_review_items || 0} export blockers`;
       document.getElementById("navPhotoCount").textContent = String(pendingPhotoCount || photos.length);
-      document.getElementById("navReviewCount").textContent = String(openReviewCount);
+      document.getElementById("navReviewCount").textContent = String(operatorWorkloadCount);
       document.getElementById("navComparisonCount").textContent = String(comparisonReviewCount);
-      document.getElementById("navExportCount").textContent = preview.ready ? "ready" : String(preview.blocked_review_items || 0);
+      document.getElementById("navExportCount").textContent = allFinalExportsReady ? "ready" : String(preview.blocked_review_items || 0);
       document.getElementById("navMouseCount").textContent = String(mice.length);
-      document.getElementById("navDashboardCount").textContent = String(openReviewCount);
+      document.getElementById("navDashboardCount").textContent = String(operatorWorkloadCount);
       document.getElementById("heroPhotoCount").textContent = String(photos.length);
       document.getElementById("heroPendingPhotos").textContent = String(pendingPhotoCount);
-      document.getElementById("heroOpenReviews").textContent = String(openReviewCount);
-      document.getElementById("topOpenReviews").textContent = `${openReviewCount} open reviews`;
-      document.getElementById("topExportStatus").textContent = preview.ready ? "Export ready" : `${preview.blocked_review_items || 0} export blockers`;
-      document.getElementById("topExportStatus").classList.toggle("warn", !preview.ready);
+      document.getElementById("heroOpenReviews").textContent = String(operatorWorkloadCount);
+      document.getElementById("topOpenReviews").textContent = `${operatorWorkloadCount} review task(s)`;
+      document.getElementById("topExportStatus").textContent = topExportLabel;
+      document.getElementById("topExportStatus").classList.toggle("warn", !allFinalExportsReady);
       const aiStatus = health.ai_draft || {};
-      document.getElementById("health").textContent = aiStatus.available ? "local + AI draft ready" : "local-only";
+      document.getElementById("health").textContent = aiStatus.available
+        ? (aiStatus.approval_required ? "AI draft: approval required" : "AI draft ready")
+        : "local-only";
     }
 
     function firstMouse(mice) {
@@ -7375,7 +7761,11 @@
           "Export preview rows",
           preview.preview_row_count || 0,
           "export or view",
-          preview.ready ? "Ready for final export." : "Use as preview only until blockers are cleared."
+          preview.ready && (preview.animal_sheet_ready ?? preview.ready)
+            ? "Ready for final export."
+            : preview.ready && Number(preview.animal_sheet_validation_blocker_items || 0)
+              ? "CSV and separation ready; animal sheet needs litter review."
+              : "Use as preview only until blockers are cleared."
         ],
         [
           "Stored source photos",
@@ -7498,23 +7888,33 @@
 
     function setFinalExportActionState(preview) {
       const ready = Boolean(preview.ready);
+      const animalSheetReady = Boolean(preview.animal_sheet_ready ?? preview.ready);
+      const allFinalReady = ready && animalSheetReady;
+      const buttonReadiness = {
+        exportReadyMouseCsvButton: Boolean(preview.mouse_csv_ready ?? preview.ready),
+        exportSeparationXlsxButton: Boolean(preview.separation_ready ?? preview.ready),
+        exportAnimalSheetXlsxButton: animalSheetReady,
+      };
       const blockerCount = Number(preview.blocked_review_items || 0);
       const genotypeBlockerCount = Number(preview.genotype_blocker_items || 0);
+      const animalSheetValidationBlockerCount = Number(preview.animal_sheet_validation_blocker_items || 0);
       const warningCount = (preview.readiness_warnings || []).length;
       const previewRowCount = Number(preview.preview_row_count || 0);
       const hasExplicitBlockers = blockerCount || genotypeBlockerCount || warningCount;
-      const reasonText = ready
+      const reasonText = allFinalReady
         ? "Final downloads are enabled because accepted state has no blocking Focus Review items."
+        : ready && animalSheetValidationBlockerCount
+          ? `CSV and separation exports are enabled; animal sheet export is disabled until ${animalSheetValidationBlockerCount} litter/date/count validation blocker(s) are reviewed.`
         : hasExplicitBlockers
           ? `Final downloads disabled: ${blockerCount} Focus Review blocker(s), ${genotypeBlockerCount} genotype blocker(s), and ${warningCount} readiness warning(s) must be reviewed first.`
           : `Final downloads disabled: ${previewRowCount} accepted source-backed export row(s) are ready. Upload, review, and accept cage-card evidence before generating final files.`;
       const reason = document.getElementById("exportDisabledReason");
       reason.textContent = reasonText;
-      reason.classList.toggle("ready", ready);
+      reason.classList.toggle("ready", allFinalReady);
       reason.setAttribute("role", "status");
-      ["exportReadyMouseCsvButton", "exportSeparationXlsxButton", "exportAnimalSheetXlsxButton"].forEach((id) => {
+      Object.entries(buttonReadiness).forEach(([id, buttonReady]) => {
         const button = document.getElementById(id);
-        button.disabled = !ready;
+        button.disabled = !buttonReady;
         button.title = reasonText;
         button.setAttribute("aria-describedby", "exportDisabledReason");
       });
@@ -7525,17 +7925,29 @@
       const readinessWarnings = preview.readiness_warnings || [];
       const readinessItems = [...blockers, ...readinessWarnings];
       const rowCount = preview.preview_row_count || 0;
-      const statusLabel = preview.ready ? "Ready for final export" : "Blocked by review";
+      const commonReady = Boolean(preview.ready);
+      const animalSheetReady = Boolean(preview.animal_sheet_ready ?? preview.ready);
+      const allFinalReady = commonReady && animalSheetReady;
+      const focusReviewBlockerCount = Number(preview.focus_review_blocker_items || 0);
+      const animalSheetValidationBlockerCount = Number(preview.animal_sheet_validation_blocker_items || 0);
+      const finalExportBlockerCount = Number(preview.final_export_blocker_items ?? preview.blocked_review_items ?? 0);
+      const statusLabel = allFinalReady
+        ? "Ready for final export"
+        : commonReady && animalSheetValidationBlockerCount
+          ? "Animal sheet review required"
+          : "Blocked by review";
       const readinessCard = document.getElementById("exportReadinessCard");
-      readinessCard.classList.toggle("ready", Boolean(preview.ready));
-      readinessCard.classList.toggle("blocked", !preview.ready);
+      readinessCard.classList.toggle("ready", allFinalReady);
+      readinessCard.classList.toggle("blocked", !allFinalReady);
       document.getElementById("exportReadinessState").textContent = statusLabel;
       const badge = document.getElementById("exportReadinessBadge");
-      badge.textContent = preview.ready ? "ready" : `${preview.blocked_review_items || 0} blocker(s)`;
-      badge.className = preview.ready ? "status" : "status warn";
+      badge.textContent = allFinalReady ? "ready" : `${finalExportBlockerCount} blocker(s)`;
+      badge.className = allFinalReady ? "status" : "status warn";
       document.getElementById("exportPreview").textContent =
-        preview.ready
+        allFinalReady
           ? `Final exports can be generated from ${rowCount} source-backed mouse row(s).`
+          : commonReady && animalSheetValidationBlockerCount
+            ? `CSV and separation exports can be generated; animal sheet needs ${animalSheetValidationBlockerCount} litter/date/count validation blocker(s) reviewed first.`
           : `Resolve Focus Review blockers before final exports; quick checks and trace-only items remain visible without blocking the file.`;
       document.getElementById("exportReadinessMetrics").innerHTML = [
         ["Photos", preview.photos || 0],
@@ -7543,15 +7955,18 @@
         ["Preview rows", rowCount],
         ["Separation rows", preview.separation_row_count || 0],
         ["Animal rows", preview.animal_sheet_row_count || 0],
-        ["Focus blockers", preview.blocked_review_items || 0],
+        ["Focus blockers", preview.focus_review_blocker_items || 0],
+        ["Final export blockers", preview.blocked_review_items || 0],
         ["Open reviews", preview.open_review_items || 0],
         ["Genotype blockers", preview.genotype_blocker_items || 0]
       ].map(([label, value]) => `
         <div class="readiness-metric"><strong>${escapeHtml(value)}</strong><span>${escapeHtml(label)}</span></div>
       `).join("");
-      document.getElementById("exportActionSummary").textContent = preview.ready
+      document.getElementById("exportActionSummary").textContent = allFinalReady
         ? "Final CSV and workbook downloads are ready. Generated files will be recorded in the export log."
-        : `${preview.blocked_review_items || 0} Focus Review blocker(s) can still change exported values; quick checks stay reviewable without blocking export.`;
+        : commonReady && animalSheetValidationBlockerCount
+          ? "Final CSV and separation workbook downloads are ready; animal sheet remains blocked by litter/date/count validation."
+        : `${focusReviewBlockerCount} Focus Review blocker(s) can still change exported values; quick checks stay reviewable without blocking export.`;
       setFinalExportActionState(preview);
       document.getElementById("exportFilenames").textContent =
         `Last export: ${preview.latest_generated_export_at || "none"}; ` +
@@ -7597,7 +8012,7 @@
           item.source_note_item_ids || "--",
           [item.source_photo_ids && `photo ${item.source_photo_ids}`, item.card_snapshot_ids && `snapshot ${item.card_snapshot_ids}`, item.raw_note_lines && `raw ${item.raw_note_lines}`].filter(Boolean).join(" / ") || "--",
           item.uncertainty || "--"
-        ], item, preview.ready, "separation")
+        ], item, preview.separation_ready ?? preview.ready, "separation")
       ).join("") || emptyTableRow("No separation preview rows yet", "Accepted source-backed separated cage rows will appear here before workbook export.", 12);
       document.getElementById("animalSheetRows").innerHTML = (preview.animal_sheet_rows || []).map((item) =>
         exportPreviewRow([
@@ -7613,7 +8028,7 @@
           item.source || "--",
           [item.source_photo_ids && `photo ${item.source_photo_ids}`, item.card_snapshot_ids && `snapshot ${item.card_snapshot_ids}`, item.raw_note_lines && `raw ${item.raw_note_lines}`].filter(Boolean).join(" / ") || "--",
           item.uncertainty || "--"
-        ], item, preview.ready, "animal")
+        ], item, preview.animal_sheet_ready ?? preview.ready, "animal")
       ).join("") || emptyTableRow("No animal sheet preview rows yet", "Accepted source-backed animal rows will appear here before workbook export.", 13);
       document.getElementById("exportBlockerRows").innerHTML = readinessItems.map((item) => `
         <tr>
@@ -7781,7 +8196,7 @@
       const aiStatus = health.ai_draft || {};
       currentAiStatus = aiStatus;
       document.getElementById("aiDraftMessage").textContent = aiStatus.available
-        ? `AI extraction ready with ${aiStatus.model} (${aiStatus.key_source || "configured"} key); uploaded photos will be extracted automatically as review evidence.`
+        ? `AI extraction available with ${aiStatus.model} (${aiStatus.key_source || "configured"} key); external inference runs only after button approval and saved results remain review evidence.`
         : "AI extraction unavailable: enter a session API key here or set OPENAI_API_KEY before starting the server. Manual transcription remains available.";
       renderReviewVocabulary(reviewVocabulary);
       renderVisualizations({ assignedStrains, strains, reviews, mice, mouseEvents, cages, matings, litters, genotypingDashboard, preview });
@@ -7984,7 +8399,7 @@
                 data-review-id="${escapeHtml(item.review_id)}"
                 data-photo-id="${escapeHtml(item.photo_id)}" aria-label="Open source photo for review item ${escapeHtml(item.review_id)}">Photo</button>
             ` : ""}
-            ${item.status === "open" && item.attention_level === "quick_check" && item.issue !== "Unlabeled numeric note needs review" ? `
+            ${reviewAllowsQuickResolve(item) ? `
               <button class="quick-resolve-review" type="button"
                 data-review-id="${escapeHtml(item.review_id)}"
                 data-current-value="${escapeHtml(item.current_value || "")}"
@@ -7995,6 +8410,7 @@
       `;
       }).join("") || stateMessageHtml("empty", "No review items match the current filters.", "Change the review filters or upload source photos to create reviewable evidence.");
       renderReviewDetail(selectedReview);
+      attachFieldReviewWorkbenchHandlers(document.getElementById("reviewDetailPanel"));
       attachReviewAuditHandler();
       attachReviewNavigationHandlers();
       document.querySelectorAll(".inspect-review").forEach((button) => {
@@ -8002,6 +8418,7 @@
           selectedReviewId = button.dataset.reviewId;
           renderReviewDetail(visibleReviews.find((item) => item.review_id === selectedReviewId));
           attachReviewResolutionHandlers(document.getElementById("reviewDetailPanel"));
+          attachFieldReviewWorkbenchHandlers(document.getElementById("reviewDetailPanel"));
           attachReviewAuditHandler();
           attachReviewNavigationHandlers();
           document.querySelectorAll("#reviewRows .review-card").forEach((card) => {
@@ -8021,6 +8438,7 @@
         });
       });
       attachReviewResolutionHandlers(document);
+      attachFieldReviewWorkbenchHandlers(document);
       document.getElementById("sourceRows").innerHTML = sourceRecords.map((source) =>
         row([source.source_type, source.source_label || "--", source.source_uri || "--", source.imported_at, source.note || "--"])
       ).join("") || emptyTableRow("No source evidence yet", "Raw photos, manual entries, and imported workbook rows will appear here as traceable evidence.", 5);
@@ -8488,7 +8906,7 @@
       });
       input.value = "";
       message.textContent = result.ai_draft?.available
-        ? `AI draft ready with ${result.ai_draft.model} (session key). The key is not written to the database.`
+        ? `AI draft available with ${result.ai_draft.model} (session key); each photo still requires button approval. The key is not written to the database.`
         : "AI draft key was not activated.";
       await refresh();
     });
@@ -9007,6 +9425,7 @@
     configureSectionViews();
     setActiveView("photo");
 
+    loadDataGuardianSummary();
     refresh().catch((error) => {
       document.getElementById("health").textContent = "error";
       document.getElementById("health").classList.add("warn");

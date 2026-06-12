@@ -462,6 +462,249 @@ def test_resolving_ear_label_review_updates_note_without_overwriting_raw(tmp_pat
         db.DB_PATH = old_db_path
 
 
+def test_resolving_ear_label_review_requires_bounded_label_code(tmp_path: Path) -> None:
+    old_db_path = db.DB_PATH
+    try:
+        parse_id, _ = seed_numeric_note_parse(tmp_path, "ear_requires_code", [{"raw": "318 RWM", "strike": "single"}])
+        note_item_id = f"note_{parse_id}_1"
+        review_id = f"review_ear_{note_item_id}"
+
+        with pytest.raises(HTTPException) as exc:
+            resolve_review_item(
+                review_id,
+                ReviewResolutionCreate(
+                    resolution_note="Checked the source photo but did not choose a bounded ear-label value.",
+                    resolved_value="R_PRIME",
+                    note_item_id=note_item_id,
+                ),
+            )
+
+        assert exc.value.status_code == 400
+        assert "ear_label_code" in str(exc.value.detail)
+        with db.connection() as conn:
+            review = conn.execute(
+                "SELECT status, resolved_at FROM review_queue WHERE review_id = ?",
+                (review_id,),
+            ).fetchone()
+            note = conn.execute(
+                """
+                SELECT parsed_ear_label_code, parsed_ear_label_review_status, needs_review
+                FROM card_note_item_log
+                WHERE note_item_id = ?
+                """,
+                (note_item_id,),
+            ).fetchone()
+            action_count = conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM action_log
+                WHERE action_type = 'review_resolved'
+                  AND target_id = ?
+                """,
+                (review_id,),
+            ).fetchone()["count"]
+
+        assert review["status"] == "open"
+        assert review["resolved_at"] is None
+        assert note["parsed_ear_label_code"] is None
+        assert note["parsed_ear_label_review_status"] == "needs_review"
+        assert note["needs_review"] == 1
+        assert action_count == 0
+    finally:
+        db.DB_PATH = old_db_path
+
+
+def test_must_review_duplicate_active_mouse_rejects_generic_quick_resolution(tmp_path: Path) -> None:
+    old_db_path = db.DB_PATH
+    try:
+        parse_id, _ = seed_numeric_note_parse(tmp_path, "duplicate_generic_resolution", [{"raw": "318 R'", "strike": "none"}])
+        review_id = "review_duplicate_active_mouse_generic"
+        with db.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO review_queue
+                    (review_id, parse_id, severity, issue, current_value,
+                     suggested_value, review_reason, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    review_id,
+                    parse_id,
+                    "High",
+                    "Duplicate active mouse",
+                    "MT318 active in two card snapshots",
+                    "Resolve duplicate active mouse before export.",
+                    "Mouse identity continuity conflict must be resolved before canonical apply.",
+                    "open",
+                    "2026-05-04T00:05:00Z",
+                ),
+            )
+
+        with pytest.raises(HTTPException) as exc:
+            resolve_review_item(
+                review_id,
+                ReviewResolutionCreate(
+                    resolution_note="Quick check accepted the suggested value.",
+                    resolved_value="Resolve duplicate active mouse before export.",
+                    correction_entity_type="review_item",
+                    correction_entity_id=review_id,
+                    correction_field_name="reviewed_value",
+                    correction_before_value="MT318 active in two card snapshots",
+                    correction_after_value="Resolve duplicate active mouse before export.",
+                ),
+            )
+
+        assert exc.value.status_code == 400
+        assert "specific" in str(exc.value.detail)
+        with db.connection() as conn:
+            review = conn.execute(
+                "SELECT status, resolved_at FROM review_queue WHERE review_id = ?",
+                (review_id,),
+            ).fetchone()
+            action_count = conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM action_log
+                WHERE action_type = 'review_resolved'
+                  AND target_id = ?
+                """,
+                (review_id,),
+            ).fetchone()["count"]
+
+        assert review["status"] == "open"
+        assert review["resolved_at"] is None
+        assert action_count == 0
+    finally:
+        db.DB_PATH = old_db_path
+
+
+def test_high_severity_review_rejects_generic_quick_resolution(tmp_path: Path) -> None:
+    old_db_path = db.DB_PATH
+    try:
+        parse_id, _ = seed_numeric_note_parse(tmp_path, "high_generic_resolution", [{"raw": "318 R'", "strike": "none"}])
+        review_id = "review_high_generic"
+        with db.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO review_queue
+                    (review_id, parse_id, severity, issue, current_value,
+                     suggested_value, review_reason, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    review_id,
+                    parse_id,
+                    "High",
+                    "Hybrid note-line evaluator conflict",
+                    "OCR: 318 R' / AI: 318 L'",
+                    "Review OCR, AI, and source-photo candidates.",
+                    "High severity evaluator conflict must be resolved from evidence.",
+                    "open",
+                    "2026-05-04T00:06:00Z",
+                ),
+            )
+
+        with pytest.raises(HTTPException) as exc:
+            resolve_review_item(
+                review_id,
+                ReviewResolutionCreate(
+                    resolution_note="Quick check accepted the suggested value.",
+                    resolved_value="Review OCR, AI, and source-photo candidates.",
+                    correction_entity_type="review_item",
+                    correction_entity_id=review_id,
+                    correction_field_name="reviewed_value",
+                    correction_before_value="OCR: 318 R' / AI: 318 L'",
+                    correction_after_value="Review OCR, AI, and source-photo candidates.",
+                ),
+            )
+
+        assert exc.value.status_code == 400
+        assert "must-review" in str(exc.value.detail)
+        with db.connection() as conn:
+            review = conn.execute(
+                "SELECT status, resolved_at FROM review_queue WHERE review_id = ?",
+                (review_id,),
+            ).fetchone()
+            action_count = conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM action_log
+                WHERE action_type = 'review_resolved'
+                  AND target_id = ?
+                """,
+                (review_id,),
+            ).fetchone()["count"]
+
+        assert review["status"] == "open"
+        assert review["resolved_at"] is None
+        assert action_count == 0
+    finally:
+        db.DB_PATH = old_db_path
+
+
+def test_high_severity_review_allows_specific_canonical_mapping_decision(tmp_path: Path) -> None:
+    old_db_path = db.DB_PATH
+    try:
+        parse_id, _ = seed_numeric_note_parse(tmp_path, "high_specific_mapping", [{"raw": "318 R'", "strike": "none"}])
+        review_id = "review_high_specific_mapping"
+        with db.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO review_queue
+                    (review_id, parse_id, severity, issue, current_value,
+                     suggested_value, review_reason, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    review_id,
+                    parse_id,
+                    "High",
+                    "Photo transcription differs from predecessor Excel",
+                    json.dumps({"manual": {"display_id": "MT318", "strain": "ApoM"}, "legacy": {"summary": {"display_id": "MT318"}}}),
+                    json.dumps({"legacy": {"summary": {"display_id": "MT318", "strain": "ApoM"}}}),
+                    "Reviewer chose to preserve the reviewed difference as a draft candidate.",
+                    "open",
+                    "2026-05-04T00:07:00Z",
+                ),
+            )
+
+        result = resolve_review_item(
+            review_id,
+            ReviewResolutionCreate(
+                resolution_note="Reviewed source photo and mapped the difference into a draft candidate.",
+                resolved_value="draft candidate",
+                legacy_decision="map_to_canonical_candidate",
+                correction_entity_type="review_item",
+                correction_entity_id=review_id,
+                correction_field_name="reviewed_value",
+                correction_before_value="Photo transcription differs from predecessor Excel",
+                correction_after_value="draft candidate",
+            ),
+        )
+
+        assert result["canonical_candidate_id"]
+        with db.connection() as conn:
+            review = conn.execute(
+                "SELECT status, resolved_at FROM review_queue WHERE review_id = ?",
+                (review_id,),
+            ).fetchone()
+            candidate = conn.execute(
+                """
+                SELECT status, review_id
+                FROM canonical_candidate
+                WHERE candidate_id = ?
+                """,
+                (result["canonical_candidate_id"],),
+            ).fetchone()
+
+        assert review["status"] == "resolved"
+        assert review["resolved_at"]
+        assert candidate["status"] == "draft"
+        assert candidate["review_id"] == review_id
+    finally:
+        db.DB_PATH = old_db_path
+
+
 def test_resolving_review_preserves_scoring_audit_taxonomy_without_private_payloads(tmp_path: Path) -> None:
     old_db_path = db.DB_PATH
     try:
@@ -1328,6 +1571,212 @@ def test_review_items_api_includes_attention_contract(tmp_path: Path) -> None:
         db.DB_PATH = old_db_path
 
 
+def test_ear_label_review_detail_uses_full_review_ear_prefix_for_note_anchor(tmp_path: Path) -> None:
+    old_db_path = db.DB_PATH
+    db.DB_PATH = tmp_path / "mouse_lims.sqlite"
+    try:
+        db.init_db()
+        parse_id = "parse_ear_anchor_custom"
+        photo_id = "photo_ear_anchor_custom"
+        note_item_id = "line_ear_anchor_custom_1"
+        record = {
+            "type": "Separated",
+            "sourcePhotoId": photo_id,
+            "rawStrain": "C57BL/6J",
+            "matchedStrain": "C57BL/6J",
+            "notes": [{"raw": "318 RWM", "strike": "none"}],
+        }
+        with db.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO photo_log
+                    (photo_id, original_filename, stored_path, uploaded_at, status, raw_source_kind)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    photo_id,
+                    "ear-anchor-custom.jpg",
+                    "data/photos/test/ear-anchor-custom.jpg",
+                    "2026-05-04T00:00:00Z",
+                    "review_pending",
+                    "cage_card_photo",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO parse_result
+                    (parse_id, photo_id, source_name, raw_payload, parsed_at, status, confidence, needs_review)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    parse_id,
+                    photo_id,
+                    "manual_photo_transcription",
+                    json.dumps(record, ensure_ascii=False),
+                    "2026-05-04T00:00:00Z",
+                    "review",
+                    70,
+                    1,
+                ),
+            )
+            snapshot_id = create_card_snapshot(conn, parse_id, photo_id, record, "2026-05-04T00:00:00Z")
+            conn.execute(
+                """
+                INSERT INTO card_note_item_log
+                    (note_item_id, photo_id, parse_id, card_snapshot_id, card_type,
+                     line_number, raw_line_text, strike_status, parsed_type,
+                     interpreted_status, parsed_mouse_display_id,
+                     parsed_ear_label_raw, parsed_ear_label_review_status,
+                     confidence, needs_review)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    note_item_id,
+                    photo_id,
+                    parse_id,
+                    "",
+                    "Separated",
+                    1,
+                    "318 RWM",
+                    "none",
+                    "mouse_item",
+                    "active",
+                    "318",
+                    "RWM",
+                    "needs_review",
+                    0.4,
+                    1,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO review_queue
+                    (review_id, parse_id, severity, issue, current_value,
+                     suggested_value, review_reason, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"review_ear_{note_item_id}",
+                    parse_id,
+                    "High",
+                    "Ear label needs review",
+                    "318 RWM",
+                    "Choose bounded ear label code.",
+                    "Unexpected ear-label mark must stay anchored to the source note line.",
+                    "open",
+                    "2026-05-04T00:00:01Z",
+                ),
+            )
+
+        [item] = [
+            review
+            for review in list_review_items()
+            if review["review_id"] == f"review_ear_{note_item_id}"
+        ]
+
+        assert item["note_item_id"] == note_item_id
+        assert item["review_note_raw_line"] == "318 RWM"
+        assert item["review_note_parsed_type"] == "mouse_item"
+        assert item["card_snapshot_id"] == snapshot_id
+        assert item["review_card_type"] == "Separated"
+        assert item["review_raw_strain_text"] == "C57BL/6J"
+        assert item["evidence_preview"] == "318 RWM"
+    finally:
+        db.DB_PATH = old_db_path
+
+
+def test_photo_level_review_detail_falls_back_to_parse_card_snapshot(tmp_path: Path) -> None:
+    old_db_path = db.DB_PATH
+    db.DB_PATH = tmp_path / "mouse_lims.sqlite"
+    try:
+        db.init_db()
+        parse_id = "parse_photo_level_snapshot"
+        photo_id = "photo_level_snapshot"
+        record = {
+            "type": "Separated",
+            "sourcePhotoId": photo_id,
+            "rawStrain": "C57BL/6J",
+            "matchedStrain": "C57BL/6J",
+            "sexRaw": "female",
+            "sexNormalized": "female",
+            "mouseCount": "3 total",
+            "dobRaw": "2026-05-01",
+            "notes": [],
+        }
+        with db.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO photo_log
+                    (photo_id, original_filename, stored_path, uploaded_at, status, raw_source_kind)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    photo_id,
+                    "photo-level-snapshot.jpg",
+                    "data/photos/test/photo-level-snapshot.jpg",
+                    "2026-05-04T00:00:00Z",
+                    "review_pending",
+                    "cage_card_photo",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO parse_result
+                    (parse_id, photo_id, source_name, raw_payload, parsed_at, status, confidence, needs_review)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    parse_id,
+                    photo_id,
+                    "manual_photo_transcription",
+                    json.dumps(record, ensure_ascii=False),
+                    "2026-05-04T00:00:00Z",
+                    "review",
+                    62,
+                    1,
+                ),
+            )
+            snapshot_id = create_card_snapshot(conn, parse_id, photo_id, record, "2026-05-04T00:00:00Z")
+            conn.execute(
+                """
+                INSERT INTO review_queue
+                    (review_id, parse_id, severity, issue, current_value,
+                     suggested_value, review_reason, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"review_{parse_id}",
+                    parse_id,
+                    "Medium",
+                    "AI-extracted photo transcription needs review",
+                    "photo-level parse",
+                    "Review card-level transcription before apply.",
+                    "Photo-level review should still show card snapshot evidence.",
+                    "open",
+                    "2026-05-04T00:00:01Z",
+                ),
+            )
+
+        [item] = [
+            review
+            for review in list_review_items()
+            if review["review_id"] == f"review_{parse_id}"
+        ]
+
+        assert item["note_item_id"] is None
+        assert item["review_note_raw_line"] is None
+        assert item["card_snapshot_id"] == snapshot_id
+        assert item["review_card_type"] == "Separated"
+        assert item["review_raw_strain_text"] == "C57BL/6J"
+        assert item["review_sex_normalized"] == "female"
+        assert item["review_count_value"] == 3
+        assert item["review_dob_raw"] == "2026-05-01"
+        assert item["review_note_summary"]["note_count"] == 0
+        assert item["review_note_summary"]["needs_review_count"] == 0
+    finally:
+        db.DB_PATH = old_db_path
+
+
 def test_export_blockers_include_only_focus_review_items(tmp_path: Path) -> None:
     old_db_path = db.DB_PATH
     db.DB_PATH = tmp_path / "mouse_lims.sqlite"
@@ -1431,6 +1880,7 @@ def test_export_blockers_include_only_focus_review_items(tmp_path: Path) -> None
         assert "Low OCR confidence" in blockers[0]["review_check_targets"]
         assert counts["must_review"] == 1
         assert counts["quick_check"] == 1
+        assert counts["operator_workload_count"] == 2
         assert blocker_count == 1
     finally:
         db.DB_PATH = old_db_path

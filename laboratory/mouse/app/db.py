@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import json
 import sqlite3
 import os
 from collections.abc import Iterator
@@ -39,38 +40,39 @@ EAR_LABEL_MASTER_SEEDS = [
 ]
 
 
-LABELING_RULE_SET_SEEDS = [
-    (
-        "label_rule_apom_tgtg_20260506",
-        "ApoM Tg/Tg 2026-05-06",
-        "ApoM Tg/Tg",
-        "2026-05-06",
-        "male_first",
-        "continues_across_cages_within_same_id",
-        "resets_per_cage",
-        "dead",
-        "sample_id_equals_mouse_display_id",
-        "ApoM-tg",
-        1,
-    ),
-]
+LABELING_RULE_SEED_CONFIG_PATH = ROOT / "config" / "seeds" / "labeling_rule_sets.json"
 
 
-LABELING_RULE_EAR_SEQUENCE_SEEDS = [
-    ("label_rule_apom_tgtg_20260506", 1, "R_PRIME"),
-    ("label_rule_apom_tgtg_20260506", 2, "L_PRIME"),
-    ("label_rule_apom_tgtg_20260506", 3, "R_PRIME_L_PRIME"),
-    ("label_rule_apom_tgtg_20260506", 4, "R_CIRCLE"),
-    ("label_rule_apom_tgtg_20260506", 5, "L_CIRCLE"),
-    ("label_rule_apom_tgtg_20260506", 6, "R_CIRCLE_L_CIRCLE"),
-    ("label_rule_apom_tgtg_20260506", 7, "R_PRIME_L_CIRCLE"),
-    ("label_rule_apom_tgtg_20260506", 8, "R_CIRCLE_L_PRIME"),
-    ("label_rule_apom_tgtg_20260506", 9, "R_DOUBLE_CIRCLE"),
-    ("label_rule_apom_tgtg_20260506", 10, "L_DOUBLE_CIRCLE"),
-    ("label_rule_apom_tgtg_20260506", 11, "R_DOUBLE_CIRCLE_L_DOUBLE_CIRCLE"),
-    ("label_rule_apom_tgtg_20260506", 12, "R_PRIME_L_DOUBLE_CIRCLE"),
-    ("label_rule_apom_tgtg_20260506", 13, "R_DOUBLE_CIRCLE_L_PRIME"),
-]
+def load_labeling_rule_seed_config(path: Path = LABELING_RULE_SEED_CONFIG_PATH) -> tuple[list[tuple], list[tuple]]:
+    if not path.exists():
+        return [], []
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    rule_set_rows = []
+    ear_sequence_rows = []
+    for rule in payload.get("rule_sets", []):
+        if not isinstance(rule, dict):
+            continue
+        rule_set_id = str(rule.get("rule_set_id") or "").strip()
+        if not rule_set_id:
+            continue
+        rule_set_rows.append(
+            (
+                rule_set_id,
+                str(rule.get("display_name") or ""),
+                str(rule.get("applies_to_strain_text") or ""),
+                str(rule.get("session_date") or ""),
+                str(rule.get("numbering_order") or ""),
+                str(rule.get("mouse_number_scope") or ""),
+                str(rule.get("ear_sequence_scope") or ""),
+                str(rule.get("crossed_out_handling") or ""),
+                str(rule.get("sample_mapping") or ""),
+                str(rule.get("genotyping_target") or ""),
+                int(rule.get("active") or 0),
+            )
+        )
+        for index, ear_label_code in enumerate(rule.get("ear_sequence", []), start=1):
+            ear_sequence_rows.append((rule_set_id, index, str(ear_label_code or "")))
+    return rule_set_rows, ear_sequence_rows
 
 
 EAR_LABEL_ALIAS_SEEDS = [
@@ -497,6 +499,68 @@ def init_db() -> None:
                 resolved_at TEXT,
                 resolution_note TEXT,
                 FOREIGN KEY (parse_id) REFERENCES parse_result(parse_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS auto_recheck_runs (
+                run_id TEXT PRIMARY KEY,
+                source_type TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                input_manifest_json TEXT NOT NULL DEFAULT '{}',
+                allow_external_services INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'created',
+                summary_json TEXT NOT NULL DEFAULT '{}',
+                canonical INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS evidence_bundles (
+                evidence_bundle_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                target_type TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                field_key TEXT NOT NULL,
+                evidence_json TEXT NOT NULL DEFAULT '{}',
+                source_layer TEXT NOT NULL,
+                canonical INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (run_id) REFERENCES auto_recheck_runs(run_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS data_guardian_review_items (
+                review_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                target_type TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                field_key TEXT NOT NULL,
+                candidate_value_raw TEXT NOT NULL DEFAULT '',
+                candidate_value_normalized TEXT NOT NULL DEFAULT '',
+                current_canonical_value TEXT NOT NULL DEFAULT '',
+                previous_confirmed_value TEXT NOT NULL DEFAULT '',
+                risk_status TEXT NOT NULL,
+                risk_reasons_json TEXT NOT NULL DEFAULT '[]',
+                recommended_action TEXT NOT NULL DEFAULT '',
+                evidence_bundle_id TEXT NOT NULL DEFAULT '',
+                resolution_status TEXT NOT NULL DEFAULT 'open',
+                canonical INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (run_id) REFERENCES auto_recheck_runs(run_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS proposed_changesets (
+                changeset_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                target_type TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                field_key TEXT NOT NULL,
+                before_value TEXT NOT NULL DEFAULT '',
+                proposed_after_value TEXT NOT NULL DEFAULT '',
+                evidence_bundle_id TEXT NOT NULL DEFAULT '',
+                confidence REAL NOT NULL DEFAULT 0,
+                approval_status TEXT NOT NULL DEFAULT 'pending',
+                canonical INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                approved_at TEXT,
+                FOREIGN KEY (run_id) REFERENCES auto_recheck_runs(run_id)
             );
 
             CREATE TABLE IF NOT EXISTS action_log (
@@ -1181,6 +1245,7 @@ def init_db() -> None:
             """,
             EAR_LABEL_ALIAS_SEEDS,
         )
+        labeling_rule_set_seeds, labeling_rule_ear_sequence_seeds = load_labeling_rule_seed_config()
         conn.executemany(
             """
             INSERT OR IGNORE INTO labeling_rule_set
@@ -1189,7 +1254,7 @@ def init_db() -> None:
                  crossed_out_handling, sample_mapping, genotyping_target, active)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            LABELING_RULE_SET_SEEDS,
+            labeling_rule_set_seeds,
         )
         conn.executemany(
             """
@@ -1197,7 +1262,7 @@ def init_db() -> None:
                 (rule_set_id, sequence_index, ear_label_code)
             VALUES (?, ?, ?)
             """,
-            LABELING_RULE_EAR_SEQUENCE_SEEDS,
+            labeling_rule_ear_sequence_seeds,
         )
         conn.executemany(
             """

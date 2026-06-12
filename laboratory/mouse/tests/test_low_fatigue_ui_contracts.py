@@ -7,7 +7,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app import db
-from app.main import app, create_card_snapshot, write_note_items_and_mouse_candidates
+from app.main import app, create_card_snapshot, focus_review_output_first_summary, write_note_items_and_mouse_candidates
 
 
 def seed_focus_review_card(tmp_path: Path) -> None:
@@ -118,6 +118,45 @@ def test_focus_review_groups_db_backed_review_items_by_photo_card(tmp_path: Path
         assert payload["source_layer"] == "export or view"
         assert payload["workload_summary"]["must_review"] == 1
         assert payload["workload_summary"]["quick_check"] >= 1
+        assert payload["workload_summary"]["operator_workload_count"] == 2
+        assert payload["output_first"] == {
+            "source_layer": "export or view",
+            "story": "input -> useful draft/output -> small exception list -> final when safe",
+            "primary_output_label": "Animal sheet draft",
+            "result_status": "blocked",
+            "headline": "Animal sheet draft generated; 2 checks before final export",
+            "show_result_first": True,
+            "exception_count": 2,
+            "visible_exception_count": 2,
+            "remaining_exception_count": 0,
+            "must_review_count": 1,
+            "quick_check_count": 1,
+            "final_export_blocked": True,
+            "exceptions": [
+                {
+                    "review_id": "review_duplicate_mt319",
+                    "issue": "Duplicate active mouse",
+                    "attention_level": "must_review",
+                    "action_label": "Inspect source evidence",
+                    "target_path": "/api/ui/focus-review",
+                    "target_view": "review",
+                    "target_review_id": "review_duplicate_mt319",
+                    "source_photo_id": "photo_focus_review",
+                    "evidence_preview": "Resolve duplicate active mouse before export.",
+                },
+                {
+                    "review_id": "review_unlabeled_numeric_parse_focus_review",
+                    "issue": "Unlabeled numeric note needs review",
+                    "attention_level": "quick_check",
+                    "action_label": "Inspect source evidence",
+                    "target_path": "/api/ui/focus-review",
+                    "target_view": "review",
+                    "target_review_id": "review_unlabeled_numeric_parse_focus_review",
+                    "source_photo_id": "photo_focus_review",
+                    "evidence_preview": "Confirm note-line interpretation.",
+                },
+            ],
+        }
         assert payload["empty_state"]["fabricated_records"] is False
         [card] = payload["cards"]
         assert card["source_photo"]["photo_id"] == "photo_focus_review"
@@ -150,6 +189,117 @@ def test_focus_review_groups_db_backed_review_items_by_photo_card(tmp_path: Path
         db.DB_PATH = old_db_path
 
 
+def test_focus_review_review_item_includes_side_by_side_workbench(tmp_path: Path) -> None:
+    old_db_path = db.DB_PATH
+    try:
+        seed_focus_review_card(tmp_path)
+        client = TestClient(app)
+
+        response = client.get("/api/ui/focus-review")
+
+        assert response.status_code == 200
+        [card] = response.json()["cards"]
+        item = next(
+            review
+            for review in card["review_items"]
+            if review["review_id"] == "review_unlabeled_numeric_parse_focus_review"
+        )
+        workbench = item["field_review_workbench"]
+        assert workbench["source_layer"] == "export or view"
+        assert workbench["canonical"] is False
+        assert workbench["layout"] == "photo_left_fields_right"
+        assert workbench["photo"] == {
+            "photo_id": "photo_focus_review",
+            "image_url": "/api/photos/photo_focus_review/image",
+            "roi_preview_url": "/api/photos/photo_focus_review/roi-preview",
+            "primary_roi_image_url": "",
+            "open_source_photo_label": "Open source photo",
+        }
+        assert workbench["policy"].startswith("Reviewed field values fill the review resolution form only")
+        assert workbench["fields"][0]["field_key"] == "note_line"
+        assert workbench["fields"][0]["label"] == "Note line"
+        assert workbench["fields"][0]["current_value"] == "MT320"
+        assert workbench["fields"][0]["suggested_value"] == "Confirm note-line interpretation."
+        assert workbench["fields"][0]["requires_user_value"] is True
+        assert workbench["fields"][0]["input_type"] == "text"
+        assert workbench["fields"][0]["trace"]["parse_id"] == "parse_focus_review"
+    finally:
+        db.DB_PATH = old_db_path
+
+
+def test_review_items_include_side_by_side_workbench(tmp_path: Path) -> None:
+    old_db_path = db.DB_PATH
+    try:
+        seed_focus_review_card(tmp_path)
+        client = TestClient(app)
+
+        response = client.get("/api/review-items")
+
+        assert response.status_code == 200
+        item = next(
+            review
+            for review in response.json()
+            if review["review_id"] == "review_unlabeled_numeric_parse_focus_review"
+        )
+        workbench = item["field_review_workbench"]
+        assert workbench["canonical"] is False
+        assert workbench["layout"] == "photo_left_fields_right"
+        assert workbench["photo"]["photo_id"] == "photo_focus_review"
+        assert workbench["fields"][0]["current_value"] == "MT320"
+        assert workbench["fields"][0]["trace"]["parse_id"] == "parse_focus_review"
+    finally:
+        db.DB_PATH = old_db_path
+
+
+def test_focus_review_workbench_surfaces_previous_position_hint(tmp_path: Path) -> None:
+    old_db_path = db.DB_PATH
+    try:
+        seed_focus_review_card(tmp_path)
+        with db.connection() as conn:
+            metadata = {
+                "hybrid_note_line_evaluator": {
+                    "previous_position_candidate": {
+                        "suggested_preserved_text": "F2 6p",
+                        "previous_raw_line_text": "F2 6p",
+                        "suggested_status_from_current_strike": "separated",
+                        "previous_trace": {
+                            "photo_id": "photo_previous",
+                            "parse_id": "parse_previous",
+                            "note_item_id": "note_previous_3",
+                            "line_number": 3,
+                            "roi_ref": "note_block:3",
+                        },
+                    }
+                }
+            }
+            conn.execute(
+                """
+                UPDATE card_note_item_log
+                SET raw_line_text = ?, parsed_metadata_json = ?
+                WHERE parse_id = ? AND line_number = ?
+                """,
+                ("F2 6", json.dumps(metadata, ensure_ascii=False), "parse_focus_review", 3),
+            )
+        client = TestClient(app)
+
+        response = client.get("/api/ui/focus-review")
+
+        assert response.status_code == 200
+        [card] = response.json()["cards"]
+        item = next(
+            review
+            for review in card["review_items"]
+            if review["review_id"] == "review_unlabeled_numeric_parse_focus_review"
+        )
+        field = item["field_review_workbench"]["fields"][0]
+        assert field["current_value"] == "F2 6"
+        assert field["previous_confirmed_value"] == "F2 6p"
+        assert field["rule_candidate"] == "separated"
+        assert field["trace"]["roi_ref"] == "note_block:3"
+    finally:
+        db.DB_PATH = old_db_path
+
+
 def test_focus_review_empty_state_does_not_fabricate_colony_data(tmp_path: Path) -> None:
     old_db_path = db.DB_PATH
     try:
@@ -162,7 +312,26 @@ def test_focus_review_empty_state_does_not_fabricate_colony_data(tmp_path: Path)
         assert response.status_code == 200
         payload = response.json()
         assert payload["source_layer"] == "export or view"
-        assert payload["workload_summary"] == {"must_review": 0, "quick_check": 0}
+        assert payload["workload_summary"] == {
+            "must_review": 0,
+            "quick_check": 0,
+            "operator_workload_count": 0,
+        }
+        assert payload["output_first"] == {
+            "source_layer": "export or view",
+            "story": "input -> useful draft/output -> small exception list -> final when safe",
+            "primary_output_label": "Animal sheet draft",
+            "result_status": "empty",
+            "headline": "No draft output yet; upload photos or source records to generate one",
+            "show_result_first": False,
+            "exception_count": 0,
+            "visible_exception_count": 0,
+            "remaining_exception_count": 0,
+            "must_review_count": 0,
+            "quick_check_count": 0,
+            "final_export_blocked": False,
+            "exceptions": [],
+        }
         assert payload["cards"] == []
         assert payload["empty_state"] == {
             "message": "No Focus Review items are currently open.",
@@ -170,6 +339,91 @@ def test_focus_review_empty_state_does_not_fabricate_colony_data(tmp_path: Path)
         }
     finally:
         db.DB_PATH = old_db_path
+
+
+def test_focus_review_output_first_reports_exception_overflow(tmp_path: Path) -> None:
+    old_db_path = db.DB_PATH
+    try:
+        seed_focus_review_card(tmp_path)
+        db.DB_PATH = tmp_path / "mouse_lims.sqlite"
+        with db.connection() as conn:
+            for index in range(3):
+                conn.execute(
+                    """
+                    INSERT INTO review_queue
+                        (review_id, parse_id, severity, issue, current_value,
+                         suggested_value, review_reason, status, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        f"review_extra_quick_{index}",
+                        "parse_focus_review",
+                        "Medium",
+                        "New workflow review type",
+                        f"extra {index}",
+                        f"Review extra exception {index}.",
+                        "Additional exception should be counted without crowding the compact list.",
+                        "open",
+                        f"2026-05-09T10:2{index}:00Z",
+                    ),
+                )
+        client = TestClient(app)
+
+        response = client.get("/api/ui/focus-review")
+
+        assert response.status_code == 200
+        output = response.json()["output_first"]
+        assert output["exception_count"] == 5
+        assert output["visible_exception_count"] == 3
+        assert output["remaining_exception_count"] == 2
+        assert output["overflow_action"] == {
+            "label": "Open full Focus Review",
+            "target_view": "review",
+            "target_path": "/api/ui/focus-review",
+            "remaining_exception_count": 2,
+        }
+        assert len(output["exceptions"]) == 3
+        assert [item["review_id"] for item in output["exceptions"]][0] == "review_duplicate_mt319"
+    finally:
+        db.DB_PATH = old_db_path
+
+
+def test_focus_review_output_first_excludes_trace_only_from_compact_exceptions() -> None:
+    output = focus_review_output_first_summary(
+        [
+            {
+                "review_id": "review_trace_only_noise",
+                "status": "open",
+                "attention_level": "trace_only",
+                "issue": "Low OCR confidence",
+                "created_at": "2026-05-09T10:00:00Z",
+                "suggested_value": "Trace-only context.",
+            },
+            {
+                "review_id": "review_must_review_action",
+                "status": "open",
+                "attention_level": "must_review",
+                "issue": "Duplicate active mouse",
+                "created_at": "2026-05-09T10:01:00Z",
+                "suggested_value": "Resolve duplicate active mouse.",
+            },
+            {
+                "review_id": "review_quick_check_action",
+                "status": "open",
+                "attention_level": "quick_check",
+                "issue": "New workflow review type",
+                "created_at": "2026-05-09T10:02:00Z",
+                "suggested_value": "Confirm the parsed note.",
+            },
+        ]
+    )
+
+    assert output["exception_count"] == 2
+    assert output["visible_exception_count"] == 2
+    assert [item["review_id"] for item in output["exceptions"]] == [
+        "review_must_review_action",
+        "review_quick_check_action",
+    ]
 
 
 def test_focus_review_excludes_hidden_default_fixture_reviews(tmp_path: Path) -> None:
@@ -220,7 +474,11 @@ def test_focus_review_excludes_hidden_default_fixture_reviews(tmp_path: Path) ->
 
         assert response.status_code == 200
         payload = response.json()
-        assert payload["workload_summary"] == {"must_review": 0, "quick_check": 0}
+        assert payload["workload_summary"] == {
+            "must_review": 0,
+            "quick_check": 0,
+            "operator_workload_count": 0,
+        }
         assert payload["cards"] == []
     finally:
         db.DB_PATH = old_db_path
@@ -1197,6 +1455,17 @@ def test_action_log_viewer_exposes_recent_actions_without_mutation(tmp_path: Pat
                 "after_value": '{"status": "resolved"}',
                 "before": {"status": "open"},
                 "after": {"status": "resolved"},
+                "evidence_refs": {
+                    "source_record_id": "",
+                    "source_photo_id": "",
+                    "source_note_item_id": "",
+                    "photo_evidence_id": "",
+                },
+                "evidence_summary": {
+                    "has_supporting_evidence": False,
+                    "supporting_evidence_count": 0,
+                    "label": "No supporting evidence linked",
+                },
                 "performed_by": "local_user",
                 "performed_role": "Colony Reviewer",
                 "created_at": "2026-05-09T11:20:00Z",
@@ -1205,6 +1474,62 @@ def test_action_log_viewer_exposes_recent_actions_without_mutation(tmp_path: Pat
         with db.connection() as conn:
             action_count = conn.execute("SELECT COUNT(*) AS count FROM action_log").fetchone()["count"]
         assert action_count == 2
+    finally:
+        db.DB_PATH = old_db_path
+
+
+def test_action_log_viewer_summarizes_supporting_evidence_without_forcing_json_inspection(tmp_path: Path) -> None:
+    old_db_path = db.DB_PATH
+    try:
+        db.DB_PATH = tmp_path / "mouse_lims.sqlite"
+        db.init_db()
+        with db.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO action_log
+                    (action_id, action_type, target_id, before_value, after_value,
+                     performed_by, performed_role, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "action_mouse_moved",
+                    "mouse_cage_moved",
+                    "MT401",
+                    json.dumps({"cage_id": "cage_old"}, ensure_ascii=False),
+                    json.dumps(
+                        {
+                            "cage_id": "cage_new",
+                            "source_record_id": "source_move_401",
+                            "evidence_refs": {
+                                "source_photo_id": "photo_move_401",
+                                "source_note_item_id": "note_move_401",
+                                "photo_evidence_id": "pe_move_401",
+                            },
+                        },
+                        ensure_ascii=False,
+                    ),
+                    "local_user",
+                    "Colony Reviewer",
+                    "2026-05-09T11:20:00Z",
+                ),
+            )
+        client = TestClient(app)
+
+        response = client.get("/api/ui/action-log?target_id=MT401")
+
+        assert response.status_code == 200
+        action = response.json()["actions"][0]
+        assert action["evidence_refs"] == {
+            "source_record_id": "source_move_401",
+            "source_photo_id": "photo_move_401",
+            "source_note_item_id": "note_move_401",
+            "photo_evidence_id": "pe_move_401",
+        }
+        assert action["evidence_summary"] == {
+            "has_supporting_evidence": True,
+            "supporting_evidence_count": 4,
+            "label": "Open supporting evidence",
+        }
     finally:
         db.DB_PATH = old_db_path
 
@@ -1368,9 +1693,20 @@ def test_mouse_pedigree_shows_selected_path_and_field_evidence(tmp_path: Path) -
         ]
         assert payload["attention_links"] == [
             {
+                "label": "Review parent evidence",
+                "target_path": "/api/ui/mouse-pedigree",
+                "target_view": "mouse-detail",
+                "reason": "relationship_evidence_missing",
+                "mode": "relationship_evidence_missing",
+                "pending_relationships": 1,
+                "must_review": 1,
+                "quick_check": 0,
+            },
+            {
                 "label": "Open Focus Review",
                 "target_path": "/api/ui/focus-review",
-                "reason": "pending_relationship",
+                "target_view": "review",
+                "reason": "open_review_workload",
                 "must_review": 1,
                 "quick_check": 0,
             }
@@ -1438,9 +1774,12 @@ def test_mouse_pedigree_pending_parent_link_without_open_review_workload(tmp_pat
         assert all(row["not_inferred"] is True for row in payload["evidence_rows"])
         assert payload["attention_links"] == [
             {
-                "label": "Open Focus Review",
-                "target_path": "/api/ui/focus-review",
-                "reason": "pending_relationship",
+                "label": "Review parent evidence",
+                "target_path": "/api/ui/mouse-pedigree",
+                "target_view": "mouse-detail",
+                "reason": "relationship_evidence_missing",
+                "mode": "relationship_evidence_missing",
+                "pending_relationships": 2,
                 "must_review": 0,
                 "quick_check": 0,
             }

@@ -1,0 +1,34 @@
+{
+  "source_layer": "cache",
+  "seed_scope": "pilot/example labeling rule configuration",
+  "rule_sets": [
+    {
+      "rule_set_id": "label_rule_apom_tgtg_20260506",
+      "display_name": "ApoM Tg/Tg 2026-05-06",
+      "applies_to_strain_text": "ApoM Tg/Tg",
+      "session_date": "2026-05-06",
+      "numbering_order": "male_first",
+      "mouse_number_scope": "continues_across_cages_within_same_id",
+      "ear_sequence_scope": "resets_per_cage",
+      "crossed_out_handling": "dead",
+      "sample_mapping": "sample_id_equals_mouse_display_id",
+      "genotyping_target": "ApoM-tg",
+      "active": 1,
+      "ear_sequence": [
+        "R_PRIME",
+        "L_PRIME",
+        "R_PRIME_L_PRIME",
+        "R_CIRCLE",
+        "L_CIRCLE",
+        "R_CIRCLE_L_CIRCLE",
+        "R_PRIME_L_CIRCLE",
+        "R_CIRCLE_L_PRIME",
+        "R_DOUBLE_CIRCLE",
+        "L_DOUBLE_CIRCLE",
+        "R_DOUBLE_CIRCLE_L_DOUBLE_CIRCLE",
+        "R_PRIME_L_DOUBLE_CIRCLE",
+        "R_DOUBLE_CIRCLE_L_PRIME"
+      ]
+    }
+  ]
+}

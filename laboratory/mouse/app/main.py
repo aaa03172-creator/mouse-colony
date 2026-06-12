@@ -33,6 +33,14 @@ from .breeding_rules import DEFAULT_BREEDING_RULE_SET
 from .labeling_rules import interpret_crossed_out_status, match_samples_to_mice
 from .hybrid_note_line_evaluator import build_rule_snapshot, evaluate_note_line_candidate
 from .matching import MatchCandidate, match_candidate
+from .review_package_import import ReviewPackageError, parse_review_package
+from .review_sentinel import (
+    build_evidence_bundle_from_review_package_item,
+    classify_recheck_risk,
+    create_auto_recheck_run,
+    create_data_guardian_review_item,
+    create_evidence_bundle,
+)
 from .storage import new_id, save_legacy_workbook, save_upload, utc_now
 from scripts.parse_legacy_workbooks import parse_workbook
 
@@ -43,6 +51,10 @@ ROI_PRESET_PATH = ROOT / "config" / "roi_presets.json"
 ARTIFACT_ROOT = Path(os.environ.get("MOUSEDB_ARTIFACT_ROOT", ROOT / "mousedb_artifacts")).expanduser().resolve()
 RUNTIME_OPENAI_API_KEY = ""
 ROI_CACHE_LOCK = threading.RLock()
+ANIMAL_SHEET_VALIDATION_ISSUES = {
+    "animal sheet count conflict",
+    "animal sheet litter/date conflict",
+}
 
 
 @asynccontextmanager
@@ -157,6 +169,14 @@ class ReviewResolutionCreate(BaseModel):
     audit_taxonomy_note: str = ""
     note_line_scoring_scope: str = ""
     field_review_outcome: dict[str, Any] = Field(default_factory=dict)
+
+
+class DataGuardianAutoRecheckCreate(BaseModel):
+    source_type: str = Field(min_length=1)
+    source_id: str = Field(min_length=1)
+    approved_local_recheck: bool = False
+    allow_external_services: bool = False
+    items: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class PhotoManualTranscriptionCreate(BaseModel):
@@ -508,6 +528,7 @@ def focus_review_workload_summary(review_items: list[dict[str, Any]]) -> dict[st
         level = str(item.get("attention_level") or "")
         if level in counts:
             counts[level] += 1
+    counts["operator_workload_count"] = counts["must_review"] + counts["quick_check"]
     return counts
 
 
@@ -545,6 +566,228 @@ def focus_review_action_hint(item: dict[str, Any]) -> dict[str, Any]:
         "requires_source_photo": has_photo,
         "safe_quick_resolve": safe_quick_resolve,
     }
+
+
+def focus_review_field_key(item: dict[str, Any]) -> str:
+    issue = str(item.get("issue") or "").strip().lower()
+    targets = [str(target).strip().lower() for target in item.get("review_check_targets") or []]
+    if "unlabeled numeric note" in issue or any("note" in target for target in targets):
+        return "note_line"
+    if "ear label" in issue or any("ear" in target for target in targets):
+        return "ear_label"
+    if any("dob" in target for target in targets):
+        return "dob"
+    if any("sex" in target or "count" in target for target in targets):
+        return "sex_count"
+    if any("strain" in target for target in targets):
+        return "strain"
+    return "reviewed_value"
+
+
+def focus_review_field_label(field_key: str) -> str:
+    return {
+        "note_line": "Note line",
+        "ear_label": "Ear label",
+        "dob": "DOB",
+        "sex_count": "Sex / count",
+        "strain": "Strain",
+        "reviewed_value": "Reviewed value",
+    }.get(field_key, "Reviewed value")
+
+
+def focus_review_input_type(field_key: str) -> str:
+    if field_key == "ear_label":
+        return "select"
+    return "text"
+
+
+def focus_review_workbench_for_item(item: dict[str, Any]) -> dict[str, Any]:
+    photo_id = str(item.get("photo_id") or "")
+    field_key = focus_review_field_key(item)
+    current_value = str(item.get("review_note_raw_line") or item.get("current_value") or "")
+    suggested_value = str(item.get("suggested_value") or "")
+    evaluator = (
+        item.get("hybrid_note_line_evaluator")
+        if isinstance(item.get("hybrid_note_line_evaluator"), dict)
+        else {}
+    )
+    previous_position = (
+        evaluator.get("previous_position_candidate")
+        if isinstance(evaluator.get("previous_position_candidate"), dict)
+        else {}
+    )
+    previous_value = str(
+        previous_position.get("suggested_preserved_text")
+        or previous_position.get("previous_raw_line_text")
+        or ""
+    )
+    rule_candidate = str(previous_position.get("suggested_status_from_current_strike") or "")
+    if previous_value and not suggested_value:
+        suggested_value = previous_value
+    return {
+        "source_layer": "export or view",
+        "canonical": False,
+        "layout": "photo_left_fields_right",
+        "photo": {
+            "photo_id": photo_id,
+            "image_url": f"/api/photos/{quote(photo_id)}/image" if photo_id else "",
+            "roi_preview_url": f"/api/photos/{quote(photo_id)}/roi-preview" if photo_id else "",
+            "primary_roi_image_url": "",
+            "open_source_photo_label": "Open source photo",
+        },
+        "fields": [
+            {
+                "field_key": field_key,
+                "label": focus_review_field_label(field_key),
+                "current_value": current_value,
+                "suggested_value": suggested_value,
+                "previous_confirmed_value": previous_value,
+                "rule_candidate": rule_candidate,
+                "confidence_label": str(item.get("attention_level") or "review"),
+                "requires_user_value": True,
+                "input_type": focus_review_input_type(field_key),
+                "trace": {
+                    "parse_id": str(item.get("parse_id") or ""),
+                    "photo_id": photo_id,
+                    "note_item_id": str(item.get("note_item_id") or ""),
+                    "line_number": item.get("review_note_line_number") or "",
+                    "roi_ref": (
+                        previous_position.get("previous_trace", {}).get("roi_ref", "")
+                        if previous_position
+                        else ""
+                    ),
+                },
+            }
+        ],
+        "actions": {
+            "confirm_label": "Use checked value",
+            "hold_label": "Keep unresolved",
+            "exclude_label": "Exclude from export candidate",
+        },
+        "policy": (
+            "Reviewed field values fill the review resolution form only; "
+            "they do not write canonical state automatically."
+        ),
+    }
+
+
+def focus_review_item_with_workbench_context(
+    item: dict[str, Any],
+    note_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    enriched = dict(item)
+    evaluator = (
+        enriched.get("hybrid_note_line_evaluator")
+        if isinstance(enriched.get("hybrid_note_line_evaluator"), dict)
+        else {}
+    )
+    if isinstance(evaluator.get("previous_position_candidate"), dict):
+        return enriched
+    issue = str(enriched.get("issue") or "").lower()
+    if "note" not in issue and "unlabeled numeric" not in issue:
+        return enriched
+    for note in note_rows:
+        metadata = json_object(note.get("parsed_metadata_json") or "{}")
+        note_evaluator = metadata.get("hybrid_note_line_evaluator", {})
+        if not isinstance(note_evaluator, dict):
+            continue
+        if not isinstance(note_evaluator.get("previous_position_candidate"), dict):
+            continue
+        enriched["review_note_raw_line"] = note.get("raw_line_text") or enriched.get("review_note_raw_line") or ""
+        enriched["note_item_id"] = note.get("note_item_id") or enriched.get("note_item_id") or ""
+        enriched["review_note_line_number"] = note.get("line_number") or enriched.get("review_note_line_number") or ""
+        enriched["hybrid_note_line_evaluator"] = note_evaluator
+        return enriched
+    return enriched
+
+
+def focus_review_output_first_summary(review_items: list[dict[str, Any]]) -> dict[str, Any]:
+    actionable_items = [
+        item
+        for item in review_items
+        if item.get("status") == "open" and item.get("attention_level") in {"must_review", "quick_check"}
+    ]
+    workload = focus_review_workload_summary(actionable_items)
+    must_review_count = int(workload.get("must_review") or 0)
+    quick_check_count = int(workload.get("quick_check") or 0)
+    exception_count = must_review_count + quick_check_count
+    if exception_count == 0:
+        return {
+            "source_layer": "export or view",
+            "story": "input -> useful draft/output -> small exception list -> final when safe",
+            "primary_output_label": "Animal sheet draft",
+            "result_status": "empty",
+            "headline": "No draft output yet; upload photos or source records to generate one",
+            "show_result_first": False,
+            "exception_count": 0,
+            "visible_exception_count": 0,
+            "remaining_exception_count": 0,
+            "must_review_count": 0,
+            "quick_check_count": 0,
+            "final_export_blocked": False,
+            "exceptions": [],
+        }
+    if must_review_count:
+        result_status = "blocked"
+    elif quick_check_count:
+        result_status = "draft"
+    else:
+        result_status = "final-ready"
+    headline = (
+        "Animal sheet draft generated; "
+        f"{exception_count} check{'s' if exception_count != 1 else ''} before final export"
+        if exception_count
+        else "Animal sheet draft generated; no checks before final export"
+    )
+    sorted_items = sorted(
+        actionable_items,
+        key=lambda review: (
+            0 if review.get("attention_level") == "must_review" else 1,
+            str(review.get("created_at") or ""),
+            str(review.get("review_id") or ""),
+        ),
+    )
+    visible_items = sorted_items[:3]
+    exceptions = []
+    for item in visible_items:
+        action_hint = focus_review_action_hint(item)
+        exceptions.append(
+            {
+                "review_id": item.get("review_id") or "",
+                "issue": item.get("issue") or "",
+                "attention_level": item.get("attention_level") or "",
+                "action_label": action_hint.get("primary_label") or "Inspect source evidence",
+                "target_path": "/api/ui/focus-review",
+                "target_view": "review",
+                "target_review_id": item.get("review_id") or "",
+                "source_photo_id": item.get("photo_id") or "",
+                "evidence_preview": item.get("suggested_value") or item.get("evidence_preview") or "",
+            }
+        )
+    remaining_exception_count = max(exception_count - len(exceptions), 0)
+    result = {
+        "source_layer": "export or view",
+        "story": "input -> useful draft/output -> small exception list -> final when safe",
+        "primary_output_label": "Animal sheet draft",
+        "result_status": result_status,
+        "headline": headline,
+        "show_result_first": True,
+        "exception_count": exception_count,
+        "visible_exception_count": len(exceptions),
+        "remaining_exception_count": remaining_exception_count,
+        "must_review_count": must_review_count,
+        "quick_check_count": quick_check_count,
+        "final_export_blocked": must_review_count > 0,
+        "exceptions": exceptions,
+    }
+    if remaining_exception_count:
+        result["overflow_action"] = {
+            "label": "Open full Focus Review",
+            "target_view": "review",
+            "target_path": "/api/ui/focus-review",
+            "remaining_exception_count": remaining_exception_count,
+        }
+    return result
 
 
 def focus_review_empty_state() -> dict[str, Any]:
@@ -595,6 +838,27 @@ def mouse_event_evidence_refs(row: Any) -> dict[str, str]:
         "source_photo_id": str(details.get("source_photo_id") or ""),
         "source_note_item_id": str(details.get("source_note_item_id") or ""),
         "photo_evidence_id": str(details.get("photo_evidence_id") or ""),
+    }
+
+
+def action_log_evidence_refs(after: dict[str, Any]) -> dict[str, str]:
+    nested_refs = after.get("evidence_refs")
+    if not isinstance(nested_refs, dict):
+        nested_refs = {}
+    return {
+        "source_record_id": str(after.get("source_record_id") or nested_refs.get("source_record_id") or ""),
+        "source_photo_id": str(after.get("source_photo_id") or nested_refs.get("source_photo_id") or ""),
+        "source_note_item_id": str(after.get("source_note_item_id") or nested_refs.get("source_note_item_id") or ""),
+        "photo_evidence_id": str(after.get("photo_evidence_id") or nested_refs.get("photo_evidence_id") or ""),
+    }
+
+
+def action_log_evidence_summary(evidence_refs: dict[str, str]) -> dict[str, Any]:
+    count = sum(1 for value in evidence_refs.values() if value)
+    return {
+        "has_supporting_evidence": count > 0,
+        "supporting_evidence_count": count,
+        "label": "Open supporting evidence" if count > 0 else "No supporting evidence linked",
     }
 
 
@@ -1440,6 +1704,258 @@ def ui_operations_home() -> dict[str, Any]:
         },
         "task_groups": grouped,
         "empty_state": operations_home_empty_state(),
+    }
+
+
+@app.post("/api/review-packages/import")
+def import_review_package(payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        parsed = parse_review_package(payload)
+    except ReviewPackageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    now = utc_now()
+    raw_payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    parse_payload = {
+        "payload_kind": "review_package_import",
+        "source_layer": "parsed or intermediate result",
+        "parsed": parsed,
+    }
+    parse_payload_json = json.dumps(parse_payload, ensure_ascii=False, sort_keys=True)
+    source_record_id = new_id("source")
+    parse_id = new_id("parse")
+    created_review_items = 0
+    created_candidates = 0
+
+    with connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO source_record (
+                source_record_id,
+                source_type,
+                source_label,
+                raw_payload,
+                imported_at,
+                checksum,
+                note
+            )
+            VALUES (?, 'mouse_card_review_package', ?, ?, ?, ?, ?)
+            """,
+            (
+                source_record_id,
+                str(payload.get("owner") or ""),
+                raw_payload_json,
+                now,
+                hashlib.sha256(raw_payload_json.encode("utf-8")).hexdigest(),
+                "Imported as non-canonical review package.",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO parse_result (
+                parse_id,
+                photo_id,
+                source_name,
+                raw_payload,
+                parsed_at,
+                status,
+                confidence,
+                needs_review,
+                source_layer
+            )
+            VALUES (?, NULL, ?, ?, ?, 'review_required', 0, 1, 'parsed or intermediate result')
+            """,
+            (parse_id, "review_package_import", parse_payload_json, now),
+        )
+
+        for card in parsed["cards"]:
+            review_id = new_id("review")
+            evidence = {
+                "source_record_id": source_record_id,
+                "card_id": card["card_id"],
+                "source_photo": card["source"]["photo"],
+                "source_note": card["source"]["note"],
+            }
+            conn.execute(
+                """
+                INSERT INTO review_queue (
+                    review_id,
+                    parse_id,
+                    severity,
+                    issue,
+                    current_value,
+                    suggested_value,
+                    review_reason,
+                    source_layer,
+                    evidence_reference_json,
+                    review_trigger_json,
+                    status,
+                    created_at
+                )
+                VALUES (?, ?, 'medium', ?, '', ?, ?, 'review item', ?, ?, 'open', ?)
+                """,
+                (
+                    review_id,
+                    parse_id,
+                    f"Review package card requires confirmation: {card['card_id']}",
+                    card["normalized"]["strain_key"],
+                    "Review package imports are non-canonical until human resolution.",
+                    json.dumps(evidence, ensure_ascii=False, sort_keys=True),
+                    json.dumps({"trigger": "review_package_import"}, ensure_ascii=False, sort_keys=True),
+                    now,
+                ),
+            )
+            created_review_items += 1
+
+            candidate_id = new_id("candidate")
+            conn.execute(
+                """
+                INSERT INTO canonical_candidate (
+                    candidate_id,
+                    review_id,
+                    parse_id,
+                    legacy_row_id,
+                    proposed_mouse_display_id,
+                    proposed_strain,
+                    proposed_dob,
+                    proposed_count,
+                    candidate_payload,
+                    status,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)
+                """,
+                (
+                    candidate_id,
+                    review_id,
+                    parse_id,
+                    card["card_id"],
+                    card["raw"]["id"],
+                    card["normalized"]["strain_key"],
+                    card["raw"]["dob"],
+                    card["raw"]["sex_total"],
+                    json.dumps(card, ensure_ascii=False, sort_keys=True),
+                    now,
+                    now,
+                ),
+            )
+            created_candidates += 1
+
+    return {
+        "source_layer": "parsed or intermediate result",
+        "canonical": False,
+        "source_record_id": source_record_id,
+        "parse_id": parse_id,
+        "created_review_items": created_review_items,
+        "created_candidates": created_candidates,
+        "export_ready": False,
+    }
+
+
+@app.post("/api/data-guardian/auto-recheck")
+def create_data_guardian_auto_recheck(payload: DataGuardianAutoRecheckCreate) -> dict[str, Any]:
+    if not payload.approved_local_recheck:
+        raise HTTPException(status_code=403, detail="Local auto-recheck requires explicit approval.")
+    if payload.allow_external_services:
+        raise HTTPException(status_code=400, detail="External OCR/LLM services are not enabled for auto-recheck.")
+
+    run_id = create_auto_recheck_run(
+        source_type=payload.source_type,
+        source_id=payload.source_id,
+        input_manifest={"item_count": len(payload.items)},
+        allow_external_services=False,
+    )
+    summary = {
+        "checked_count": len(payload.items),
+        "auto_passed_count": 0,
+        "quick_review_count": 0,
+        "photo_check_required_count": 0,
+        "conflict_review_count": 0,
+        "blocked_count": 0,
+        "recheck_failed_count": 0,
+    }
+    review_item_ids: list[str] = []
+
+    for index, item in enumerate(payload.items, start=1):
+        bundle = build_evidence_bundle_from_review_package_item(item, run_id=run_id)
+        risk = classify_recheck_risk(
+            {
+                **bundle["evidence"],
+                "field_key": bundle["field_key"],
+                "current_canonical_value": item.get("current_canonical_value"),
+                "requires_external_service": item.get("requires_external_service", False),
+            }
+        )
+        risk_status = risk["risk_status"]
+        summary_key = f"{risk_status}_count"
+        if summary_key in summary:
+            summary[summary_key] += 1
+        if risk_status == "auto_passed":
+            continue
+        evidence_bundle_id = f"{run_id}:evidence:{index}"
+        create_evidence_bundle(
+            evidence_bundle_id=evidence_bundle_id,
+            run_id=run_id,
+            target_type=bundle["target_type"],
+            target_id=bundle["target_id"] or f"item-{index}",
+            field_key=bundle["field_key"],
+            evidence=bundle["evidence"],
+            source_layer=bundle["source_layer"],
+        )
+        review_item_ids.append(
+            create_data_guardian_review_item(
+                run_id=run_id,
+                target_type=bundle["target_type"],
+                target_id=bundle["target_id"] or f"item-{index}",
+                field_key=bundle["field_key"],
+                candidate_value_raw=str(item.get("candidate_value") or ""),
+                candidate_value_normalized=str(item.get("candidate_value") or ""),
+                current_canonical_value=str(item.get("current_canonical_value") or ""),
+                previous_confirmed_value=str(item.get("previous_confirmed_value") or ""),
+                risk_status=risk_status,
+                risk_reasons=risk["risk_reasons"],
+                recommended_action="review_evidence",
+                evidence_bundle_id=evidence_bundle_id,
+            )
+        )
+
+    return {
+        "run_id": run_id,
+        "canonical": False,
+        "source_layer": "review item",
+        "summary": summary,
+        "review_item_ids": review_item_ids,
+    }
+
+
+@app.get("/api/data-guardian/review-queue")
+def list_data_guardian_review_queue(include_auto_passed: bool = False) -> dict[str, Any]:
+    where_clause = "" if include_auto_passed else "WHERE risk_status != 'auto_passed'"
+    with connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT review_id, run_id, target_type, target_id, field_key,
+                   candidate_value_raw, candidate_value_normalized,
+                   current_canonical_value, previous_confirmed_value,
+                   risk_status, risk_reasons_json, recommended_action,
+                   evidence_bundle_id, resolution_status, canonical
+            FROM data_guardian_review_items
+            {where_clause}
+            ORDER BY created_at, review_id
+            """
+        ).fetchall()
+    return {
+        "source_layer": "review item",
+        "canonical": False,
+        "items": [
+            {
+                **dict(row),
+                "canonical": bool(row["canonical"]),
+                "risk_reasons": json.loads(row["risk_reasons_json"] or "[]"),
+            }
+            for row in rows
+        ],
     }
 
 
@@ -3819,6 +4335,9 @@ def ui_action_log(target_id: str = "", action_type: str = "", limit: int = 50) -
     for row in rows:
         before_value = row["before_value"] or ""
         after_value = row["after_value"] or ""
+        before = json_object(before_value)
+        after = json_object(after_value)
+        evidence_refs = action_log_evidence_refs(after)
         actions.append(
             {
                 "action_id": row["action_id"],
@@ -3826,8 +4345,10 @@ def ui_action_log(target_id: str = "", action_type: str = "", limit: int = 50) -
                 "target_id": row["target_id"],
                 "before_value": before_value,
                 "after_value": after_value,
-                "before": json_object(before_value),
-                "after": json_object(after_value),
+                "before": before,
+                "after": after,
+                "evidence_refs": evidence_refs,
+                "evidence_summary": action_log_evidence_summary(evidence_refs),
                 "performed_by": row["performed_by"],
                 "performed_role": row["performed_role"],
                 "created_at": row["created_at"],
@@ -4801,6 +5322,55 @@ def validation_report_status(checks: list[dict[str, Any]]) -> str:
     return "pass"
 
 
+def validation_outcome_metrics(checks: list[dict[str, Any]]) -> dict[str, Any]:
+    by_key: dict[str, dict[str, int | str]] = {}
+    outcome_counts = {
+        "accepted": 0,
+        "corrected": 0,
+        "dismissed_with_reason": 0,
+        "false_positive": 0,
+        "policy_exception": 0,
+    }
+    for check in checks:
+        check_key = str(check.get("check_key") or "open_focus_review_blocker")
+        status = str(check.get("status") or "pass")
+        metrics = by_key.setdefault(
+            check_key,
+            {
+                "check_key": check_key,
+                "fired_count": 0,
+                "blocker_count": 0,
+                "warning_count": 0,
+                "pass_count": 0,
+                "false_positive_count": 0,
+            },
+        )
+        if status == "blocked":
+            metrics["fired_count"] = int(metrics["fired_count"]) + 1
+            metrics["blocker_count"] = int(metrics["blocker_count"]) + 1
+        elif status == "warning":
+            metrics["fired_count"] = int(metrics["fired_count"]) + 1
+            metrics["warning_count"] = int(metrics["warning_count"]) + 1
+        else:
+            metrics["pass_count"] = int(metrics["pass_count"]) + 1
+    fired_count = sum(int(item["fired_count"]) for item in by_key.values())
+    blocker_count = sum(int(item["blocker_count"]) for item in by_key.values())
+    warning_count = sum(int(item["warning_count"]) for item in by_key.values())
+    pass_count = sum(int(item["pass_count"]) for item in by_key.values())
+    return {
+        "source_layer": "export or view",
+        "measurement_boundary": "sanitized validation/review outcome telemetry",
+        "fired_count": fired_count,
+        "pass_count": pass_count,
+        "blocker_count": blocker_count,
+        "warning_count": warning_count,
+        "operator_workload_count": blocker_count,
+        "review_fatigue_units": fired_count,
+        "outcome_counts": outcome_counts,
+        "by_check_key": [by_key[key] for key in sorted(by_key)],
+    }
+
+
 def build_canonical_apply_validation_report(
     preview: dict[str, Any],
     *,
@@ -4903,6 +5473,333 @@ def export_row_trace_refs(row: dict[str, Any]) -> dict[str, list[str]]:
     }
 
 
+def _export_iso_date(value: Any) -> date | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _export_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _export_p_count(value: Any) -> int | None:
+    match = re.search(r"(?<!\d)(\d+)\s*p\b", str(value or ""), flags=re.IGNORECASE)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+COUNT_RECONCILIATION_EVENT_KEYWORDS = {
+    "death",
+    "dead",
+    "loss",
+    "lost",
+    "sacrifice",
+    "sacrificed",
+    "euthanasia",
+    "euthanized",
+    "separation",
+    "separated",
+    "wean",
+    "weaned",
+    "move",
+    "moved",
+    "transfer",
+    "transferred",
+}
+
+
+def _count_reconciliation_event_type(event_type: Any) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(event_type or "").lower()).strip("_")
+    tokens = {token for token in normalized.split("_") if token}
+    return normalized in COUNT_RECONCILIATION_EVENT_KEYWORDS or bool(tokens & COUNT_RECONCILIATION_EVENT_KEYWORDS)
+
+
+def _event_count_value(event: dict[str, Any]) -> int | None:
+    detail = event.get("details") if isinstance(event.get("details"), dict) else {}
+    for key in (
+        "count",
+        "delta_count",
+        "loss_count",
+        "death_count",
+        "pup_count",
+        "number_lost",
+        "number_dead",
+        "number_weaned",
+        "weaning_count",
+    ):
+        value = event.get(key)
+        if value is None and isinstance(detail, dict):
+            value = detail.get(key)
+        count = _export_int(value)
+        if count is not None:
+            return count
+    return None
+
+
+def _count_reconciliation_events(row: dict[str, Any]) -> list[dict[str, Any]]:
+    events = row.get("count_reconciliation_events")
+    if not isinstance(events, list):
+        return []
+    result = []
+    for event in events:
+        if isinstance(event, dict) and _count_reconciliation_event_type(event.get("event_type")):
+            result.append(event)
+    return result
+
+
+def _event_source_refs(event: dict[str, Any]) -> list[str]:
+    detail = event.get("details") if isinstance(event.get("details"), dict) else {}
+    return unique_nonempty(
+        [
+            event.get("source_record_id"),
+            event.get("source_photo_id"),
+            event.get("source_note_item_id"),
+            detail.get("source_record_id") if isinstance(detail, dict) else "",
+            detail.get("source_photo_id") if isinstance(detail, dict) else "",
+            detail.get("source_note_item_id") if isinstance(detail, dict) else "",
+            detail.get("photo_evidence_id") if isinstance(detail, dict) else "",
+        ]
+    )
+
+
+def _explained_count_delta(
+    *,
+    delta: int,
+    current_count: int,
+    events: list[dict[str, Any]],
+) -> tuple[bool, list[str], list[str]]:
+    contributing_event_refs: list[str] = []
+    contributing_evidence_refs: list[str] = []
+    sourced_delta_total = 0
+    sourced_current_total = 0
+    for event in events:
+        event_evidence_refs = _event_source_refs(event)
+        if not event_evidence_refs:
+            continue
+        event_refs = split_export_ref_values(event.get("event_id"))
+        event_type = str(event.get("event_type") or "").lower()
+        count = _event_count_value(event)
+        if count is None:
+            count = 1
+        contributing_event_refs.extend(event_refs)
+        contributing_evidence_refs.extend(event_evidence_refs)
+        if any(token in event_type for token in ("wean", "separat", "move", "transfer")):
+            sourced_current_total += count
+        else:
+            sourced_delta_total += count
+    contributing_event_refs = unique_nonempty(contributing_event_refs)
+    contributing_evidence_refs = unique_nonempty(contributing_evidence_refs)
+    if sourced_delta_total == delta and contributing_evidence_refs:
+        return True, contributing_event_refs, contributing_evidence_refs
+    if sourced_current_total == current_count and contributing_evidence_refs:
+        return True, contributing_event_refs, contributing_evidence_refs
+    return False, contributing_event_refs, contributing_evidence_refs
+
+
+def _animal_sheet_check_refs(row: dict[str, Any]) -> dict[str, list[str]]:
+    refs = export_row_trace_refs(row)
+    return {
+        "photo_ids": refs["photo_ids"],
+        "note_item_ids": refs["note_item_ids"],
+        "source_record_ids": refs["source_record_ids"],
+        "mating_ids": split_export_ref_values(row.get("mating_id")),
+        "litter_ids": split_export_ref_values(row.get("litter_id")),
+    }
+
+
+def litter_birth_date_review_status_from_source_payload(raw_payload: Any) -> str:
+    payload = json_object(str(raw_payload or ""))
+    status_keys = {
+        "litter_birth_date_review_status",
+        "litterBirthDateReviewStatus",
+        "birth_date_review_status",
+        "birthDateReviewStatus",
+    }
+    stack: list[Any] = [payload]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            for key, value in current.items():
+                if key in status_keys:
+                    status = str(value or "").strip()
+                    if status:
+                        return status
+                elif isinstance(value, (dict, list)):
+                    stack.append(value)
+        elif isinstance(current, list):
+            stack.extend(current)
+    return ""
+
+
+def validate_animal_sheet_litter_date_counts(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    checks: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict) or not str(row.get("litter_id") or "").strip():
+            continue
+        refs = _animal_sheet_check_refs(row)
+        target_refs = unique_nonempty(refs["litter_ids"] + refs["mating_ids"])
+        evidence_refs = unique_nonempty(
+            refs["photo_ids"] + refs["note_item_ids"] + refs["source_record_ids"]
+        )
+        mating_date = _export_iso_date(row.get("mating_start_date"))
+        birth_date = _export_iso_date(row.get("litter_birth_date") or row.get("dob"))
+        if mating_date and birth_date and birth_date < mating_date:
+            checks.append(
+                {
+                    "validator_check_key": "litter_date_before_mating",
+                    "validation_report_check_key": "impossible_date",
+                    "status": "blocked",
+                    "severity": "high",
+                    "message": "Animal sheet litter birth date is earlier than the mating start date.",
+                    "target_refs": target_refs,
+                    "evidence_refs": evidence_refs,
+                    "recommended_action": "Confirm the litter date from source photo, note line, or imported row before final animal sheet export.",
+                    "source_refs": refs,
+                }
+            )
+        weaning_date = _export_iso_date(row.get("weaning_date"))
+        if birth_date and weaning_date and weaning_date < birth_date:
+            checks.append(
+                {
+                    "validator_check_key": "weaning_date_before_birth",
+                    "validation_report_check_key": "impossible_date",
+                    "status": "blocked",
+                    "severity": "high",
+                    "message": "Animal sheet weaning/separation date is earlier than the litter birth date.",
+                    "target_refs": target_refs,
+                    "evidence_refs": evidence_refs,
+                    "recommended_action": "Confirm separation or weaning date before final animal sheet export.",
+                    "source_refs": refs,
+                }
+            )
+        born = _export_int(row.get("number_born"))
+        weaned = _export_int(row.get("number_weaned"))
+        if born is not None and weaned is not None and weaned > born:
+            checks.append(
+                {
+                    "validator_check_key": "weaned_count_exceeds_born",
+                    "validation_report_check_key": "count_mismatch",
+                    "status": "blocked",
+                    "severity": "high",
+                    "message": "Animal sheet weaned/separated count is greater than the recorded pup count.",
+                    "target_refs": target_refs,
+                    "evidence_refs": evidence_refs,
+                    "recommended_action": "Review pup count and separation count before final animal sheet export.",
+                    "source_refs": refs,
+                }
+            )
+        pubs_count = _export_p_count(row.get("pubs"))
+        current_pup_count = _export_p_count(row.get("mouse_id"))
+        if born is not None and current_pup_count is not None and current_pup_count < born:
+            delta = born - current_pup_count
+            count_events = _count_reconciliation_events(row)
+            explained, event_refs, event_evidence_refs = _explained_count_delta(
+                delta=delta,
+                current_count=current_pup_count,
+                events=count_events,
+            )
+            if explained:
+                checks.append(
+                    {
+                        "validator_check_key": "current_pup_count_delta_explained",
+                        "validation_report_check_key": "count_mismatch",
+                        "status": "warning",
+                        "severity": "medium",
+                        "message": "Animal sheet current pup count differs from born count, but source-backed events explain the difference.",
+                        "target_refs": target_refs + event_refs,
+                        "evidence_refs": unique_nonempty(evidence_refs + event_evidence_refs),
+                        "recommended_action": "Keep the source-backed loss/separation/weaning event trace with the animal sheet handoff.",
+                        "source_refs": {
+                            **refs,
+                            "event_ids": event_refs,
+                            "event_source_refs": event_evidence_refs,
+                        },
+                    }
+                )
+            else:
+                checks.append(
+                    {
+                        "validator_check_key": "current_pup_count_delta_without_event",
+                        "validation_report_check_key": "count_mismatch",
+                        "status": "blocked",
+                        "severity": "high",
+                        "message": "Animal sheet current pup count is lower than the born count without a source-backed loss, separation, or weaning event.",
+                        "target_refs": target_refs + event_refs,
+                        "evidence_refs": unique_nonempty(evidence_refs + event_evidence_refs),
+                        "recommended_action": "Review death/loss/separation evidence before final animal sheet export.",
+                        "source_refs": {
+                            **refs,
+                            "event_ids": event_refs,
+                            "event_source_refs": event_evidence_refs,
+                        },
+                    }
+                )
+        if born is not None and pubs_count is not None and pubs_count != born:
+            checks.append(
+                {
+                    "validator_check_key": "pubs_count_conflicts_with_number_born",
+                    "validation_report_check_key": "count_mismatch",
+                    "status": "blocked",
+                    "severity": "high",
+                    "message": "Animal sheet Pubs text count conflicts with the accepted litter pup count.",
+                    "target_refs": target_refs,
+                    "evidence_refs": evidence_refs,
+                    "recommended_action": "Review the Pubs text and accepted litter count before final animal sheet export.",
+                    "source_refs": refs,
+                }
+            )
+        date_review_status = str(row.get("litter_birth_date_review_status") or "").strip().lower()
+        if birth_date and date_review_status in {"check", "needs_review"}:
+            checks.append(
+                {
+                    "validator_check_key": "ambiguous_litter_date_normalization",
+                    "validation_report_check_key": "impossible_date",
+                    "status": "warning",
+                    "severity": "medium",
+                    "message": "Animal sheet litter date has a normalized value but remains marked for review.",
+                    "target_refs": target_refs,
+                    "evidence_refs": evidence_refs,
+                    "recommended_action": "Review ambiguous litter date evidence before relying on the animal sheet row.",
+                    "source_refs": refs,
+                }
+            )
+        if refs["source_record_ids"] and not unique_nonempty(refs["photo_ids"] + refs["note_item_ids"]):
+            checks.append(
+                {
+                    "validator_check_key": "litter_source_record_without_photo_or_note",
+                    "validation_report_check_key": "missing_source_trace",
+                    "status": "warning",
+                    "severity": "medium",
+                    "message": "Animal sheet litter row has source-record trace but no source photo or note-line trace.",
+                    "target_refs": target_refs,
+                    "evidence_refs": evidence_refs,
+                    "recommended_action": "Review source workbook/manual row and attach photo or note evidence when available.",
+                    "source_refs": refs,
+                }
+            )
+    blocked_count = sum(1 for check in checks if check["status"] == "blocked")
+    warning_count = sum(1 for check in checks if check["status"] == "warning")
+    return {
+        "source_layer": "export or view",
+        "status": "blocked" if blocked_count else ("warning" if warning_count else "pass"),
+        "blocked_count": blocked_count,
+        "warning_count": warning_count,
+        "checks": checks,
+        "review_item_candidates": [],
+    }
+
+
 def build_export_validation_report(
     preview: dict[str, Any],
     *,
@@ -4913,7 +5810,10 @@ def build_export_validation_report(
 ) -> dict[str, Any]:
     created_at = created_at or utc_now()
     review_blockers = preview.get("review_blockers") if isinstance(preview.get("review_blockers"), list) else []
-    blocked_review_count = int(preview.get("blocked_review_items") or len(review_blockers) or 0)
+    focus_review_count = int(
+        preview.get("focus_review_blocker_items", preview.get("blocked_review_items") or len(review_blockers) or 0)
+        or 0
+    )
     export_rows = []
     trace_rows = []
     if export_type == "animal_sheet_xlsx":
@@ -4949,11 +5849,11 @@ def build_export_validation_report(
     checks = [
         {
             "check_key": "open_focus_review_blocker",
-            "status": "blocked" if blocked_review_count else "pass",
-            "severity": "high" if blocked_review_count else "low",
+            "status": "blocked" if focus_review_count else "pass",
+            "severity": "high" if focus_review_count else "low",
             "message": (
-                f"{blocked_review_count} Focus Review blocker(s) remain open before final export."
-                if blocked_review_count
+                f"{focus_review_count} Focus Review blocker(s) remain open before final export."
+                if focus_review_count
                 else "No Focus Review blockers remain for final export."
             ),
             "target_refs": review_ids,
@@ -4974,6 +5874,34 @@ def build_export_validation_report(
             "recommended_action": "Review export trace sheet before handoff.",
         },
     ]
+    if export_type == "animal_sheet_xlsx":
+        litter_validation = preview.get("animal_sheet_litter_validation")
+        if isinstance(litter_validation, dict):
+            for check in litter_validation.get("checks", []):
+                if not isinstance(check, dict):
+                    continue
+                report_key = str(check.get("validation_report_check_key") or "")
+                if report_key not in {
+                    "impossible_date",
+                    "count_mismatch",
+                    "missing_source_trace",
+                    "open_focus_review_blocker",
+                }:
+                    report_key = "open_focus_review_blocker"
+                checks.append(
+                    {
+                        "check_key": report_key,
+                        "status": str(check.get("status") or "warning"),
+                        "severity": str(check.get("severity") or "medium"),
+                        "message": f"{check.get('validator_check_key')}: {check.get('message')}",
+                        "target_refs": unique_nonempty(check.get("target_refs", [])),
+                        "evidence_refs": unique_nonempty(check.get("evidence_refs", [])),
+                        "recommended_action": str(
+                            check.get("recommended_action")
+                            or "Review animal sheet litter/date/count conflict before export."
+                        ),
+                    }
+                )
     report_id = f"validation_report_export_{safe_artifact_slug(export_type)}_{safe_artifact_slug(query or filename or 'all')}"
     return {
         "report_id": report_id,
@@ -4996,6 +5924,7 @@ def build_export_validation_report(
             "mouse_ids": unique_nonempty(mouse_ids),
         },
         "checks": checks,
+        "validation_outcome_metrics": validation_outcome_metrics(checks),
         "summary": (
             f"Export validation report for {export_type}; "
             f"query={query.strip() or 'all'}, filename={filename or 'not selected'}."
@@ -5110,8 +6039,113 @@ def create_export_provenance_artifacts(
         "manifest": manifest,
         "manifest_artifact_path": manifest["artifact_path"],
         "validation_report_id": validation_report["report_id"],
+        "validation_report_path": validation_report["artifact_path"],
         "state_watermark": manifest["artifact"].get("state_watermark", ""),
     }
+
+
+def ensure_export_validation_parse(conn: Any) -> str:
+    parse_id = "parse_export_validation"
+    existing = conn.execute("SELECT parse_id FROM parse_result WHERE parse_id = ?", (parse_id,)).fetchone()
+    if existing:
+        return parse_id
+    now = utc_now()
+    conn.execute(
+        """
+        INSERT INTO parse_result
+            (parse_id, photo_id, source_name, raw_payload, parsed_at, status, confidence, needs_review)
+        VALUES (?, NULL, ?, ?, ?, ?, ?, ?)
+        """,
+        (parse_id, "animal_sheet_export_validation", "{}", now, "review", 0, 1),
+    )
+    return parse_id
+
+
+def persist_animal_sheet_litter_review_items(
+    conn: Any,
+    validation: dict[str, Any],
+    parse_id: str = "parse_export_validation",
+) -> list[dict[str, Any]]:
+    created: list[dict[str, Any]] = []
+    for check in validation.get("checks", []):
+        if not isinstance(check, dict) or check.get("status") != "blocked":
+            continue
+        issue = (
+            "Animal sheet count conflict"
+            if check.get("validation_report_check_key") == "count_mismatch"
+            else "Animal sheet litter/date conflict"
+        )
+        trigger = {
+            "validator_check_key": check.get("validator_check_key", ""),
+            "validation_report_check_key": check.get("validation_report_check_key", ""),
+            "target_refs": check.get("target_refs", []),
+        }
+        trigger_json = json.dumps(trigger, sort_keys=True, ensure_ascii=False)
+        current_value = json.dumps(check.get("target_refs", []), ensure_ascii=False)
+        suggested_value = json.dumps(check.get("evidence_refs", []), ensure_ascii=False)
+        review_reason = str(check.get("message") or "Review animal sheet litter/date/count conflict before export.")
+        evidence_reference_json = json.dumps(check.get("source_refs", {}), ensure_ascii=False)
+        existing = conn.execute(
+            """
+            SELECT review_id
+            FROM review_queue
+            WHERE status = 'open'
+              AND issue = ?
+              AND review_trigger_json = ?
+            """,
+            (issue, trigger_json),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                """
+                UPDATE review_queue
+                SET severity = ?,
+                    current_value = ?,
+                    suggested_value = ?,
+                    review_reason = ?,
+                    priority = ?,
+                    evidence_reference_json = ?
+                WHERE review_id = ?
+                """,
+                (
+                    str(check.get("severity") or "high"),
+                    current_value,
+                    suggested_value,
+                    review_reason,
+                    "high",
+                    evidence_reference_json,
+                    existing["review_id"],
+                ),
+            )
+            created.append({"review_id": existing["review_id"], "created": False, "refreshed": True})
+            continue
+        review_id = new_id("review")
+        now = utc_now()
+        conn.execute(
+            """
+            INSERT INTO review_queue
+                (review_id, parse_id, severity, issue, current_value, suggested_value,
+                 review_reason, priority, evidence_reference_json, review_trigger_json,
+                 status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                review_id,
+                parse_id,
+                str(check.get("severity") or "high"),
+                issue,
+                current_value,
+                suggested_value,
+                review_reason,
+                "high",
+                evidence_reference_json,
+                trigger_json,
+                "open",
+                now,
+            ),
+        )
+        created.append({"review_id": review_id, "created": True})
+    return created
 
 
 def canonical_candidate_apply_preview(conn: Any, candidate_id: str) -> dict[str, Any]:
@@ -8721,6 +9755,7 @@ def list_review_items() -> list[dict[str, Any]]:
                    review_note.interpreted_status AS review_note_interpreted_status,
                    review_note.parsed_mouse_display_id AS review_note_mouse_display_id,
                    review_note.parsed_count AS review_note_count,
+                   review_note.line_number AS review_note_line_number,
                    review_note.parsed_metadata_json AS review_note_parsed_metadata_json,
                    review_snapshot.card_snapshot_id,
                    review_snapshot.card_type AS review_card_type,
@@ -8750,7 +9785,7 @@ def list_review_items() -> list[dict[str, Any]]:
                     review_note.note_item_id = CASE
                         WHEN review.review_id LIKE 'review_unlabeled_numeric_note_%'
                             THEN SUBSTR(review.review_id, LENGTH('review_unlabeled_numeric_') + 1)
-                        WHEN review.review_id LIKE 'review_ear_note_%'
+                        WHEN review.review_id LIKE 'review_ear_%'
                             THEN SUBSTR(review.review_id, LENGTH('review_ear_') + 1)
                         ELSE ''
                     END
@@ -8762,6 +9797,8 @@ def list_review_items() -> list[dict[str, Any]]:
                                 WHERE note.parse_id = review.parse_id
                                   AND (
                                       note.parsed_type = 'unlabeled_numeric_note'
+                                      OR note.raw_line_text = review.current_value
+                                      OR note.parsed_mouse_display_id = review.current_value
                                       OR note.note_item_id IN (
                                           SELECT correction.entity_id
                                           FROM correction_log correction
@@ -8777,7 +9814,16 @@ def list_review_items() -> list[dict[str, Any]]:
                     END
                 )
             LEFT JOIN card_snapshot review_snapshot
-                ON review_snapshot.card_snapshot_id = review_note.card_snapshot_id
+                ON review_snapshot.card_snapshot_id = COALESCE(
+                    NULLIF(review_note.card_snapshot_id, ''),
+                    (
+                        SELECT fallback_snapshot.card_snapshot_id
+                        FROM card_snapshot fallback_snapshot
+                        WHERE fallback_snapshot.parse_id = review.parse_id
+                        ORDER BY fallback_snapshot.updated_at DESC, fallback_snapshot.card_snapshot_id
+                        LIMIT 1
+                    )
+                )
             ORDER BY review.created_at DESC
             """
         ).fetchall()
@@ -8806,6 +9852,7 @@ def list_review_items() -> list[dict[str, Any]]:
         payload["review_plausibility_findings"] = parse_payload_plausibility_findings(parse_payload)
         payload.update(review_attention_level(payload, parse_payload))
         payload["review_check_targets"] = review_check_targets(payload, parse_payload)
+        payload["field_review_workbench"] = focus_review_workbench_for_item(payload)
         payload.pop("parse_confidence", None)
         result.append(payload)
     return result
@@ -8831,7 +9878,8 @@ def ui_focus_review() -> dict[str, Any]:
             note_rows = conn.execute(
                 f"""
                 SELECT note_item_id, parse_id, card_snapshot_id, line_number, raw_line_text,
-                       parsed_mouse_display_id, interpreted_status, needs_review
+                       parsed_mouse_display_id, interpreted_status, needs_review,
+                       parsed_metadata_json
                 FROM card_note_item_log
                 WHERE parse_id IN ({placeholders})
                 ORDER BY parse_id, line_number, note_item_id
@@ -8893,16 +9941,24 @@ def ui_focus_review() -> dict[str, Any]:
                 "review_count": len(items),
                 "review_items": [
                     {
-                        "review_id": item.get("review_id"),
-                        "issue": item.get("issue"),
-                        "issue_label": focus_review_issue_label(item),
-                        "attention_level": item.get("attention_level"),
-                        "attention_reason": item.get("attention_reason"),
-                        "review_check_targets": item.get("review_check_targets", []),
-                        "evidence_preview": item.get("evidence_preview") or item.get("suggested_value") or "",
-                        "action_hint": focus_review_action_hint(item),
+                        "review_id": enriched_item.get("review_id"),
+                        "issue": enriched_item.get("issue"),
+                        "issue_label": focus_review_issue_label(enriched_item),
+                        "attention_level": enriched_item.get("attention_level"),
+                        "attention_reason": enriched_item.get("attention_reason"),
+                        "review_check_targets": enriched_item.get("review_check_targets", []),
+                        "evidence_preview": (
+                            enriched_item.get("evidence_preview")
+                            or enriched_item.get("suggested_value")
+                            or ""
+                        ),
+                        "action_hint": focus_review_action_hint(enriched_item),
+                        "field_review_workbench": focus_review_workbench_for_item(enriched_item),
                     }
-                    for item in items
+                    for enriched_item in [
+                        focus_review_item_with_workbench_context(item, note_rows)
+                        for item in items
+                    ]
                 ],
                 "mouse_rows": mouse_rows,
                 "collapsed_sections": {
@@ -8920,6 +9976,7 @@ def ui_focus_review() -> dict[str, Any]:
         "source_layer": "export or view",
         "page_question": "What needs my decision today?",
         "workload_summary": focus_review_workload_summary(reviews),
+        "output_first": focus_review_output_first_summary(reviews),
         "cards": cards,
         "empty_state": focus_review_empty_state(),
     }
@@ -9747,12 +10804,26 @@ def ui_mouse_pedigree(mouse_id: str = "") -> dict[str, Any]:
 
     pending_relationships = sum(1 for row in evidence_rows if row["status"] == "pending_review")
     attention_links = []
-    if pending_relationships or must_review or quick_check:
+    if pending_relationships:
+        attention_links.append(
+            {
+                "label": "Review parent evidence",
+                "target_path": "/api/ui/mouse-pedigree",
+                "target_view": "mouse-detail",
+                "reason": "relationship_evidence_missing",
+                "mode": "relationship_evidence_missing",
+                "pending_relationships": pending_relationships,
+                "must_review": must_review,
+                "quick_check": quick_check,
+            }
+        )
+    if must_review or quick_check:
         attention_links.append(
             {
                 "label": "Open Focus Review",
                 "target_path": "/api/ui/focus-review",
-                "reason": "pending_relationship" if pending_relationships else "open_review_workload",
+                "target_view": "review",
+                "reason": "open_review_workload",
                 "must_review": must_review,
                 "quick_check": quick_check,
             }
@@ -10028,6 +11099,50 @@ def review_private_accuracy_field_outcome(payload: ReviewResolutionCreate) -> di
     }
 
 
+def is_generic_review_item_resolution(payload: ReviewResolutionCreate) -> bool:
+    correction_entity_type = payload.correction_entity_type.strip()
+    correction_field_name = payload.correction_field_name.strip()
+    legacy_decision = payload.legacy_decision.strip() or "resolve"
+    has_specific_resolution_payload = any(
+        [
+            legacy_decision != "resolve",
+            payload.canonical_entity_type.strip(),
+            payload.canonical_entity_id.strip(),
+            payload.reviewed_strain_name.strip(),
+            payload.reviewed_gene_symbol.strip(),
+            payload.reviewed_allele_name.strip(),
+            payload.note_label_decision.strip(),
+            payload.ear_label_code.strip(),
+            payload.audit_taxonomy_status.strip(),
+            payload.note_line_scoring_scope.strip(),
+            bool(payload.field_review_outcome),
+        ]
+    )
+    if has_specific_resolution_payload:
+        return False
+    if correction_entity_type == "review_item" and correction_field_name == "reviewed_value":
+        return True
+    return not any([correction_entity_type, correction_field_name, has_specific_resolution_payload])
+
+
+def enforce_review_resolution_requirements(review: Any, payload: ReviewResolutionCreate) -> None:
+    issue = str(review["issue"] or "").strip()
+    issue_key = issue.lower()
+    severity_key = str(review["severity"] or "").strip().lower()
+    priority_key = str(review["priority"] or "").strip().lower()
+    is_must_review = severity_key == "high" or priority_key == "high" or "duplicate active mouse" in issue_key
+    if issue == "Ear label needs review" and not payload.ear_label_code.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="ear_label_code is required before resolving an ear label review.",
+        )
+    if is_must_review and is_generic_review_item_resolution(payload):
+        raise HTTPException(
+            status_code=400,
+            detail="High-risk must-review items require a specific evidence-backed correction before they can be resolved.",
+        )
+
+
 @app.post("/api/review-items/{review_id}/resolve")
 def resolve_review_item(review_id: str, payload: ReviewResolutionCreate) -> dict[str, Any]:
     resolved_at = utc_now()
@@ -10087,6 +11202,7 @@ def resolve_review_item(review_id: str, payload: ReviewResolutionCreate) -> dict
                 status_code=400,
                 detail="Correction entity type, entity id, and field name are required when recording a review correction.",
             )
+        enforce_review_resolution_requirements(existing, payload)
         before = dict(existing)
         canonical_candidate_id = None
         note_label_update = None
@@ -10339,6 +11455,9 @@ def genotyping_result_evidence_refs(conn: Any, payload: GenotypingUpdate, normal
         ).fetchone()
         if evidence is None:
             raise HTTPException(status_code=400, detail="photo_evidence_id does not exist.")
+        evidence_photo_id = str(evidence["source_photo_id"] or "")
+        if source_photo_id and evidence_photo_id and source_photo_id != evidence_photo_id:
+            raise HTTPException(status_code=400, detail="photo_evidence_id does not match source_photo_id.")
         source_photo_id = source_photo_id or evidence["source_photo_id"]
     if source_photo_id:
         photo = conn.execute("SELECT 1 FROM photo_log WHERE photo_id = ?", (source_photo_id,)).fetchone()
@@ -11041,7 +12160,15 @@ def move_mouse_to_cage(mouse_id: str, payload: MouseCageMove) -> dict[str, Any]:
                 "mouse_cage_moved",
                 mouse_id,
                 json.dumps(dict(previous) if previous else {}, ensure_ascii=False),
-                json.dumps({"cage_id": payload.cage_id, "cage_label": cage["cage_label"]}, ensure_ascii=False),
+                json.dumps(
+                    {
+                        "cage_id": payload.cage_id,
+                        "cage_label": cage["cage_label"],
+                        "source_record_id": source_record_id,
+                        "evidence_refs": evidence_refs,
+                    },
+                    ensure_ascii=False,
+                ),
                 moved_at,
             ),
         )
@@ -11725,6 +12852,7 @@ def wean_litter(litter_id: str, payload: LitterWeanCreate) -> dict[str, Any]:
             "weaning_date": weaning_date,
             "source_record_id": source_record_id,
             "weaned_mouse_ids": [row["mouse_id"] for row in selected_offspring],
+            "evidence_refs": evidence_refs,
         }
         conn.execute(
             """
@@ -12084,9 +13212,9 @@ def log_workbook_export(
     state_watermark: str = "",
 ) -> None:
     note = (
-        "Blocked final XLSX export because Focus Review blockers remain."
+        "Blocked final export because Focus Review blockers remain."
         if status == "blocked"
-        else "XLSX generated from workbook preview."
+        else "Generated export from local preview."
     )
     provenance_bits = [
         f"manifest={manifest_artifact_path}" if manifest_artifact_path else "",
@@ -12406,7 +13534,11 @@ def order_by_ids(rows: list[Any], id_column: str, ordered_ids: list[str]) -> lis
     return sorted([dict(row) for row in rows], key=lambda row: order.get(str(row[id_column]), len(order)))
 
 
-def open_review_attention_counts(conn: Any) -> dict[str, int]:
+def animal_sheet_validation_issue(issue: Any) -> bool:
+    return str(issue or "").strip().lower() in ANIMAL_SHEET_VALIDATION_ISSUES
+
+
+def open_review_attention_counts(conn: Any, *, exclude_animal_sheet_validation: bool = False) -> dict[str, int]:
     rows = conn.execute(
         """
         SELECT review.review_id, review.parse_id, review.severity, review.issue,
@@ -12423,15 +13555,23 @@ def open_review_attention_counts(conn: Any) -> dict[str, int]:
     counts = {"must_review": 0, "quick_check": 0, "trace_only": 0, "hidden_default": 0}
     for row in rows:
         payload = dict(row)
+        if exclude_animal_sheet_validation and animal_sheet_validation_issue(payload.get("issue")):
+            continue
         payload["confidence"] = payload.get("parse_confidence")
         parse_payload = json_object(payload.pop("parse_raw_payload", "{}"))
         payload.pop("parse_confidence", None)
         attention = review_attention_level(payload, parse_payload)["attention_level"]
         counts[attention] = counts.get(attention, 0) + 1
+    counts["operator_workload_count"] = counts.get("must_review", 0) + counts.get("quick_check", 0)
     return counts
 
 
-def open_review_blockers(conn: Any, limit: int = 10) -> list[dict[str, Any]]:
+def open_review_blockers(
+    conn: Any,
+    limit: int = 10,
+    *,
+    exclude_animal_sheet_validation: bool = False,
+) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
         SELECT review.review_id, review.parse_id, review.severity, review.issue,
@@ -12460,6 +13600,8 @@ def open_review_blockers(conn: Any, limit: int = 10) -> list[dict[str, Any]]:
     blockers: list[dict[str, Any]] = []
     for row in rows:
         payload = dict(row)
+        if exclude_animal_sheet_validation and animal_sheet_validation_issue(payload.get("issue")):
+            continue
         payload["confidence"] = payload.get("parse_confidence")
         parse_payload = json_object(payload.pop("parse_raw_payload", "{}"))
         payload.pop("parse_confidence", None)
@@ -12474,8 +13616,11 @@ def open_review_blockers(conn: Any, limit: int = 10) -> list[dict[str, Any]]:
     return blockers
 
 
-def export_review_blocker_count(conn: Any) -> int:
-    return open_review_attention_counts(conn).get("must_review", 0)
+def export_review_blocker_count(conn: Any, *, exclude_animal_sheet_validation: bool = False) -> int:
+    return open_review_attention_counts(
+        conn,
+        exclude_animal_sheet_validation=exclude_animal_sheet_validation,
+    ).get("must_review", 0)
 
 
 def genotype_export_blockers(conn: Any, limit: int = 25) -> list[dict[str, Any]]:
@@ -13263,34 +14408,13 @@ def export_mice_csv(query: str = "", require_ready: bool = False) -> Response:
             payload = dict(row)
             writer.writerow({field: payload.get(field, "") for field in fieldnames})
             row_count += 1
-        blocked_review_count = export_review_blocker_count(conn)
+        blocked_review_count = export_review_blocker_count(
+            conn,
+            exclude_animal_sheet_validation=True,
+        )
         suffix = "_filtered" if query.strip() else ""
         filename = f"mouse_records{suffix}.csv"
         export_status = "blocked" if require_ready and blocked_review_count else "generated"
-        note = (
-            "Blocked final CSV export because Focus Review blockers remain."
-            if export_status == "blocked"
-            else "Generated from local mouse records CSV endpoint."
-        )
-        conn.execute(
-            """
-            INSERT INTO export_log
-                (export_id, export_type, filename, query, row_count,
-                 blocked_review_count, status, exported_at, note)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                new_id("export"),
-                "mouse_csv",
-                filename,
-                query.strip(),
-                row_count,
-                blocked_review_count,
-                export_status,
-                utc_now(),
-                note,
-            ),
-        )
         if export_status == "blocked":
             blocked_error = {
                 "blocked_review_count": blocked_review_count,
@@ -13299,6 +14423,26 @@ def export_mice_csv(query: str = "", require_ready: bool = False) -> Response:
                 "filename": filename,
                 "source_layer": "export or view",
             }
+    provenance = create_export_provenance_artifacts(
+        export_preview(),
+        export_type="mouse_csv",
+        filename=filename,
+        query=query,
+        status=export_status,
+        row_count=row_count,
+        blocked_review_count=blocked_review_count,
+    )
+    log_workbook_export(
+        "mouse_csv",
+        filename,
+        query,
+        row_count,
+        blocked_review_count,
+        export_status,
+        manifest_artifact_path=provenance["manifest_artifact_path"],
+        validation_report_id=provenance["validation_report_id"],
+        state_watermark=provenance["state_watermark"],
+    )
 
     if blocked_error:
         raise HTTPException(
@@ -13306,6 +14450,9 @@ def export_mice_csv(query: str = "", require_ready: bool = False) -> Response:
             detail={
                 "message": "Resolve Focus Review blockers before final export.",
                 **blocked_error,
+                "export_manifest_path": provenance["manifest_artifact_path"],
+                "validation_report_id": provenance["validation_report_id"],
+                "validation_report_path": provenance["validation_report_path"],
             },
         )
 
@@ -13365,25 +14512,26 @@ def export_genotyping_worklist_csv(query: str = "") -> Response:
         blocked_review_count = export_review_blocker_count(conn)
         suffix = "_filtered" if query.strip() else ""
         filename = f"genotyping_worklist{suffix}.csv"
-        conn.execute(
-            """
-            INSERT INTO export_log
-                (export_id, export_type, filename, query, row_count,
-                 blocked_review_count, status, exported_at, note)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                new_id("export"),
-                "genotyping_worklist_csv",
-                filename,
-                query.strip(),
-                row_count,
-                blocked_review_count,
-                "generated",
-                utc_now(),
-                "Generated as a companion genotyping worklist export without changing lab workbook shape.",
-            ),
-        )
+    provenance = create_export_provenance_artifacts(
+        export_preview(),
+        export_type="genotyping_worklist_csv",
+        filename=filename,
+        query=query,
+        status="generated",
+        row_count=row_count,
+        blocked_review_count=blocked_review_count,
+    )
+    log_workbook_export(
+        "genotyping_worklist_csv",
+        filename,
+        query,
+        row_count,
+        blocked_review_count,
+        "generated",
+        manifest_artifact_path=provenance["manifest_artifact_path"],
+        validation_report_id=provenance["validation_report_id"],
+        state_watermark=provenance["state_watermark"],
+    )
 
     return Response(
         content=output.getvalue(),
@@ -13543,7 +14691,7 @@ def export_separation_xlsx(query: str = "", require_ready: bool = True) -> Respo
         for row in filtered_rows
     ]
     filename = export_filename("separation", preview, query)
-    blocked_count = preview["blocked_review_items"]
+    blocked_count = preview.get("focus_review_blocker_items", preview["blocked_review_items"])
     if require_ready and blocked_count:
         provenance = create_export_provenance_artifacts(
             preview,
@@ -13637,6 +14785,34 @@ def export_animal_sheet_xlsx(query: str = "", require_ready: bool = True) -> Res
     filename = export_filename("animal", preview, query)
     blocked_count = preview["blocked_review_items"]
     if require_ready and blocked_count:
+        validation_reviews: list[dict[str, Any]] = []
+        animal_sheet_validation = preview.get("animal_sheet_litter_validation", {})
+        focus_blockers = int(preview.get("focus_review_blocker_items") or 0)
+        animal_sheet_validation_blockers = int(preview.get("animal_sheet_validation_blocker_items") or 0)
+        blocker_summary = {
+            "focus_review_blocker_items": focus_blockers,
+            "animal_sheet_validation_blocker_items": animal_sheet_validation_blockers,
+            "final_export_blocker_items": int(blocked_count or 0),
+        }
+        if focus_blockers and animal_sheet_validation_blockers:
+            blocked_message = (
+                "Resolve Focus Review blockers and animal sheet litter/date/count validation blockers "
+                "before final animal sheet workbook export."
+            )
+        elif animal_sheet_validation_blockers:
+            blocked_message = (
+                "Review animal sheet litter/date/count validation blockers before final animal sheet workbook export."
+            )
+        else:
+            blocked_message = "Resolve Focus Review blockers before final animal sheet workbook export."
+        if isinstance(animal_sheet_validation, dict) and int(animal_sheet_validation.get("blocked_count") or 0):
+            with connection() as conn:
+                parse_id = ensure_export_validation_parse(conn)
+                validation_reviews = persist_animal_sheet_litter_review_items(
+                    conn,
+                    animal_sheet_validation,
+                    parse_id=parse_id,
+                )
         provenance = create_export_provenance_artifacts(
             preview,
             export_type="animal_sheet_xlsx",
@@ -13660,13 +14836,17 @@ def export_animal_sheet_xlsx(query: str = "", require_ready: bool = True) -> Res
         raise HTTPException(
             status_code=409,
             detail={
-                "message": "Resolve Focus Review blockers before final animal sheet workbook export.",
+                "message": blocked_message,
                 "blocked_review_count": blocked_count,
+                "blocker_summary": blocker_summary,
                 "review_blockers": preview["review_blockers"],
                 "filename": filename,
                 "source_layer": "export or view",
+                "animal_sheet_litter_validation": preview.get("animal_sheet_litter_validation", {}),
+                "animal_sheet_validation_review_items": validation_reviews,
                 "export_manifest_path": provenance["manifest_artifact_path"],
                 "validation_report_id": provenance["validation_report_id"],
+                "validation_report_path": provenance["validation_report_path"],
             },
         )
     payload = build_xlsx(
@@ -13740,7 +14920,7 @@ def export_row_state_policy() -> dict[str, Any]:
     return {
         "source_layer": "export or view",
         "source_state_layer": "canonical structured state",
-        "states": ["ready", "blocked_by_review", "stale_after_correction"],
+        "states": ["ready", "blocked_by_review", "blocked_by_litter_conflict", "stale_after_correction"],
         "editable": False,
     }
 
@@ -13811,15 +14991,63 @@ def load_export_note_evidence(conn: Any, note_item_ids: list[str]) -> dict[str, 
     return {row["note_item_id"]: dict(row) for row in rows}
 
 
+def load_litter_count_reconciliation_events(conn: Any, litter_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+    litter_ids = [litter_id for litter_id in dict.fromkeys(litter_ids) if litter_id]
+    if not litter_ids:
+        return {}
+    placeholders = ", ".join("?" for _ in litter_ids)
+    rows = conn.execute(
+        f"""
+        SELECT event_id, mouse_id, event_type, event_date, related_entity_id,
+               related_entity_id AS event_litter_id,
+               source_record_id, details, created_at
+        FROM mouse_event
+        WHERE related_entity_type = 'litter'
+          AND related_entity_id IN ({placeholders})
+        ORDER BY event_date, created_at, event_id
+        """,
+        litter_ids,
+    ).fetchall()
+    mouse_rows = conn.execute(
+        f"""
+        SELECT event.event_id, event.mouse_id, event.event_type, event.event_date,
+               event.related_entity_id, mouse.litter_id AS event_litter_id,
+               event.source_record_id, event.details, event.created_at
+        FROM mouse_event event
+        JOIN mouse_master mouse ON mouse.mouse_id = event.mouse_id
+        WHERE mouse.litter_id IN ({placeholders})
+        ORDER BY event.event_date, event.created_at, event.event_id
+        """,
+        litter_ids,
+    ).fetchall()
+    events_by_litter: dict[str, list[dict[str, Any]]] = {}
+    seen_event_ids: set[str] = set()
+    for row in list(rows) + list(mouse_rows):
+        event = dict(row)
+        event_id = str(event.get("event_id") or "")
+        if event_id and event_id in seen_event_ids:
+            continue
+        if event_id:
+            seen_event_ids.add(event_id)
+        event["details"] = json_object(event.get("details"))
+        if not _count_reconciliation_event_type(event.get("event_type")):
+            continue
+        events_by_litter.setdefault(str(event["event_litter_id"] or ""), []).append(event)
+    return events_by_litter
+
+
 @app.get("/api/export-preview")
 def export_preview() -> dict[str, Any]:
     with connection() as conn:
         photos = conn.execute("SELECT COUNT(*) AS count FROM photo_log").fetchone()["count"]
-        review_rows = open_review_blockers(conn)
+        review_rows = open_review_blockers(conn, exclude_animal_sheet_validation=True)
         open_reviews = conn.execute(
             "SELECT COUNT(*) AS count FROM review_queue WHERE status = 'open'"
         ).fetchone()["count"]
-        review_attention_counts = open_review_attention_counts(conn)
+        review_attention_counts = open_review_attention_counts(
+            conn,
+            exclude_animal_sheet_validation=True,
+        )
         blocked_reviews = review_attention_counts.get("must_review", 0)
         genotype_blocker_rows = genotype_export_blockers(conn)
         genotype_blocker_count = len(genotype_blocker_rows)
@@ -13860,12 +15088,18 @@ def export_preview() -> dict[str, Any]:
             """
             SELECT l.litter_id, l.litter_label, l.mating_id, l.birth_date,
                    l.number_born, l.number_alive, l.number_weaned, l.weaning_date,
-                   l.status, l.source_record_id
+                   l.status, l.source_record_id,
+                   source.raw_payload AS source_raw_payload
             FROM litter_registry l
+            LEFT JOIN source_record source ON source.source_record_id = l.source_record_id
             ORDER BY l.birth_date, l.created_at
             LIMIT 120
             """
         ).fetchall()
+        litter_count_events = load_litter_count_reconciliation_events(
+            conn,
+            [str(row["litter_id"] or "") for row in litter_rows],
+        )
         stale_state = export_staleness(conn)
         row_state = export_row_state(blocked_reviews, stale_state)
     rows = []
@@ -14041,10 +15275,38 @@ def export_preview() -> dict[str, Any]:
                     "card_snapshot_ids": "",
                     "raw_note_lines": "",
                     "uncertainty": "",
+                    "mating_id": litter["mating_id"] or "",
+                    "litter_id": litter["litter_id"] or "",
+                    "mating_start_date": mating["start_date"] or "",
+                    "litter_birth_date": litter["birth_date"] or "",
+                    "litter_birth_date_review_status": litter_birth_date_review_status_from_source_payload(
+                        litter["source_raw_payload"]
+                    ),
+                    "number_born": litter["number_born"],
+                    "number_alive": litter["number_alive"],
+                    "number_weaned": litter["number_weaned"],
+                    "weaning_date": litter["weaning_date"] or "",
+                    "count_reconciliation_events": litter_count_events.get(litter["litter_id"], []),
                     **row_state,
                     "export_note": "Litter row generated from accepted litter state.",
                 }
             )
+    animal_sheet_litter_validation = validate_animal_sheet_litter_date_counts(animal_rows)
+    validation_blockers = int(animal_sheet_litter_validation["blocked_count"])
+    if validation_blockers:
+        blocked_litter_ids = {
+            target_ref
+            for check in animal_sheet_litter_validation["checks"]
+            if check.get("status") == "blocked"
+            for target_ref in check.get("target_refs", [])
+        }
+        for row in animal_rows:
+            if row.get("litter_id") in blocked_litter_ids:
+                row["row_state"] = "blocked_by_litter_conflict"
+                row["row_state_reason"] = "Animal sheet litter/date/count validation blocked final export."
+    total_blocked_reviews = blocked_reviews + validation_blockers
+    common_export_ready = blocked_reviews == 0 and bool(rows)
+    animal_sheet_ready = total_blocked_reviews == 0 and bool(rows)
     return {
         "source_layer": "export or view",
         "export_type": "separation_preview",
@@ -14063,15 +15325,22 @@ def export_preview() -> dict[str, Any]:
         "animal_sheet_columns": ["Cage No.", "Strain", "Sex", "I.D", "genotype", "DOB", "Mating date", "Pubs", "Status", "Source"],
         "photos": photos,
         "parsed_results": parsed,
-        "blocked_review_items": blocked_reviews,
+        "blocked_review_items": total_blocked_reviews,
+        "final_export_blocker_items": total_blocked_reviews,
+        "focus_review_blocker_items": blocked_reviews,
+        "animal_sheet_validation_blocker_items": validation_blockers,
         "open_review_items": open_reviews,
         "open_review_attention_counts": review_attention_counts,
         "genotype_blocker_items": genotype_blocker_count,
         "experiment_ready": genotype_blocker_count == 0 and bool(rows),
-        "ready": blocked_reviews == 0 and bool(rows),
+        "ready": common_export_ready,
+        "mouse_csv_ready": common_export_ready,
+        "separation_ready": common_export_ready,
+        "animal_sheet_ready": animal_sheet_ready,
         "preview_rows": rows,
         "separation_rows": separation_rows,
         "animal_sheet_rows": animal_rows,
+        "animal_sheet_litter_validation": animal_sheet_litter_validation,
         "preview_row_count": len(rows),
         "separation_row_count": len(separation_rows),
         "animal_sheet_row_count": len(animal_rows),

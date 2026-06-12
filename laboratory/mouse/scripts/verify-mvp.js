@@ -226,7 +226,14 @@ async function main() {
   assert(
     staticHtml.includes("function setFinalExportActionState(preview)") &&
       staticHtml.includes("exportDisabledReason") &&
-      staticHtml.includes("button.disabled = !ready") &&
+      staticHtml.includes("button.disabled = !buttonReady") &&
+      staticHtml.includes("preview.mouse_csv_ready") &&
+      staticHtml.includes("preview.separation_ready") &&
+      staticHtml.includes("preview.animal_sheet_ready") &&
+      staticHtml.includes('blocked_by_litter_conflict: "Litter conflict"') &&
+      staticHtml.includes("Animal sheet review required") &&
+      staticHtml.includes("Animal sheet review") &&
+      staticHtml.includes("CSV and separation ready; animal sheet needs litter review.") &&
       staticHtml.includes('button.setAttribute("aria-describedby", "exportDisabledReason")') &&
       staticHtml.includes("accepted source-backed export row(s) are ready"),
     "Export Center final actions should expose disabled reasons, accessibility links, and empty accepted-row guidance."
@@ -1365,7 +1372,7 @@ async function main() {
         review_id: "review_follow_done",
         parse_id: "parse_follow_done",
         status: "open",
-        issue: "Resolved count check",
+        issue: "Low-confidence strain alias",
         severity: "Medium",
         attention_level: "quick_check",
         priority: "medium",
@@ -1406,7 +1413,7 @@ async function main() {
   });
   assert(
     reviewFollowThrough.stateKind === "success" &&
-      reviewFollowThrough.statusText.includes("Review resolved: Resolved count check") &&
+      reviewFollowThrough.statusText.includes("Review resolved: Low-confidence strain alias") &&
       reviewFollowThrough.statusText.includes("Next: Next count check") &&
       reviewFollowThrough.statusText.includes("next-card.png") &&
       reviewFollowThrough.statusText.includes("Current detail remains anchored"),
